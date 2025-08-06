@@ -1,0 +1,46 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Development data
+/dev_data/
+*.jpg
+*.png
+!docs/**/*.jpg
+!docs/**/*.png
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
+# Test outputs
+test_capture.jpg
+detection_test.jpg
+detection_annotated.jpg
+
+# Examples directory (created during install)
+/examples/
+
+# Build artifacts
+*.o
+*.so
+*.a
+
+# Backup files
+*.bak
+*~
+
+# Python cache (if any scripts)
+__pycache__/
+*.pyc
