@@ -2,13 +2,31 @@
 
 A secure face authentication system for Linux, inspired by Windows Hello. Uses infrared cameras for enhanced security and integrates with Linux PAM for system-wide authentication.
 
+## Current Status
+
+**Phase 1.9 MVP Complete** - Basic PAM integration is working. The system supports:
+- K-of-N authentication (require K successful matches out of N attempts)
+- Rolling embedding buffer for improved accuracy
+- Both system-wide and per-user enrollment
+- PAM integration for sudo, GDM, SDDM
+- Automatic camera detection with IR camera support
+
 ## Features
 
-- 🎥 IR camera support for better security
-- 🔐 Secure biometric data storage with encryption
-- 🚀 Fast authentication using ONNX models
-- 🐧 PAM integration for sudo, login, and lock screen
-- 🛡️ Anti-spoofing with liveness detection
+### Implemented
+- ✅ IR camera support with auto-detection
+- ✅ K-of-N matching strategy for robust authentication
+- ✅ Rolling buffer with embedding fusion
+- ✅ High-quality enrollment with multiple captures
+- ✅ PAM integration via pam_exec
+- ✅ INT8 model quantization for ~16+ FPS performance
+- ✅ Development mode for safe testing
+
+### Planned (Phase 2)
+- 🔒 AES-256-GCM encryption for embeddings
+- 🔑 Secure key storage in kernel keyring
+- 🛡️ Enhanced anti-spoofing measures
+- 📊 Rate limiting and audit logging
 
 ## Development Guide
 
@@ -181,11 +199,46 @@ https://vcipl-okstate.org/pbvs/bench/Data/07/download.html
 
 ⚠️ **Important:** Face authentication should never be the sole authentication method. This system is designed to work alongside traditional passwords as an additional convenience factor.
 
+## Installation
+
+### Quick Install (System-wide)
+
+```bash
+# Build and install
+sudo ./install.sh
+
+# Enroll yourself
+linuxsup enroll --username $USER
+
+# Test authentication
+linuxsup test --username $USER
+
+# Enable for sudo (optional)
+sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo
+```
+
+### Configuration
+
+The system uses a TOML configuration file at `/etc/linuxsup/face-auth.toml`:
+
+```toml
+[auth]
+similarity_threshold = 0.6     # Face matching threshold
+k_required_matches = 2         # Require 2 successful matches
+n_total_attempts = 3          # Out of 3 total attempts
+embedding_buffer_size = 3     # Rolling buffer size
+use_embedding_fusion = true   # Enable temporal fusion
+
+[camera]
+device_index = 51            # 999 for auto-detect
+warmup_frames = 3           # IR camera warmup
+```
+
 ## Implementation Status
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for detailed development roadmap.
+Current phase: **Phase 1.9 MVP Complete**
 
-Current phase: **Phase 1 - Local Development Mode**
+The system is functional for testing but NOT SECURE for production use. Phase 2 will add encryption and security hardening.
 
 ## License
 
