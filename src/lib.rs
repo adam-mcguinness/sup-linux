@@ -6,6 +6,7 @@ pub mod detector;
 pub mod dev_mode;
 pub mod error;
 pub mod paths;
+pub mod protocol;
 pub mod quality;
 pub mod recognizer;
 pub mod storage;
