@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "pam_module"]
+
 [package]
 name = "linuxSup"
 version = "0.1.0"
@@ -14,6 +17,10 @@ path = "src/main.rs"
 [[bin]]
 name = "linuxsup-auth"
 path = "src/bin/linuxsup-auth.rs"
+
+[[bin]]
+name = "linuxsup-embedding-service"
+path = "src/bin/embedding_service.rs"
 
 [dependencies]
 # Core
@@ -48,16 +55,20 @@ tracing-subscriber = "0.3"
 # Utils
 chrono = "0.4"
 
+# Security
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+
+# IPC
+serde_json = "1.0"
+
 # Visualization (optional)
 plotters = { version = "0.3", optional = true }
 nalgebra = { version = "0.32", optional = true }
 
-# PAM (optional for now)
-pam = { version = "0.7", optional = true }
-
 [features]
 default = []
-pam-module = ["pam"]
 visualization = ["plotters", "nalgebra"]
 
 [profile.release]
