@@ -3,7 +3,7 @@ use linuxSup::{
     config::Config,
     detector::FaceDetector,
     recognizer::FaceRecognizer,
-    error::Result,
+    error::{Result, FaceAuthError},
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::io::{Read, Write};
@@ -12,7 +12,7 @@ use std::path::Path;
 use std::fs;
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
-use anyhow::Context;
+use anyhow::Context as _;
 
 const SOCKET_PATH: &str = "/run/linuxsup/embedding.sock";
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,7 +100,7 @@ fn handle_client(
     
     // Sanity check
     if request_len > 1024 * 1024 {  // 1MB max
-        anyhow::bail!("Request too large: {} bytes", request_len);
+        return Err(anyhow::anyhow!("Request too large: {} bytes", request_len).into());
     }
     
     // Read request
@@ -108,7 +108,8 @@ fn handle_client(
     stream.read_exact(&mut request_buf)?;
     
     // Deserialize request
-    let request: AuthRequest = bincode::deserialize(&request_buf)?;
+    let request: AuthRequest = bincode::deserialize(&request_buf)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize request: {}", e))?;
     
     tracing::info!("Processing embedding request for user: {}", request.username);
     
@@ -136,7 +137,8 @@ fn handle_client(
     };
     
     // Serialize response
-    let response_data = bincode::serialize(&response)?;
+    let response_data = bincode::serialize(&response)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
     let response_len = (response_data.len() as u32).to_le_bytes();
     
     // Send response
@@ -176,7 +178,7 @@ fn capture_and_generate_embedding(
         std::thread::sleep(Duration::from_millis(50));
     }
     
-    anyhow::bail!("No face detected within timeout")
+    Err(FaceAuthError::NoFaceDetected)
 }
 
 fn generate_signature(embedding: &[f32], challenge: &[u8]) -> Vec<u8> {

@@ -54,6 +54,7 @@ tracing-subscriber = "0.3"
 
 # Utils
 chrono = "0.4"
+crossterm = "0.27"
 
 # Security
 rand = "0.8"

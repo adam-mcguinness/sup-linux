@@ -1,3 +1,4 @@
+mod ascii_preview;
 mod auth;
 mod camera;
 mod config;

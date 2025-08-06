@@ -4,7 +4,7 @@ A secure face authentication system for Linux, inspired by Windows Hello. Uses i
 
 ## Current Status
 
-**Phase 1.9 MVP Complete** - Basic PAM integration is working. The system supports:
+**Phase 3 - Secure PAM Integration** - Native PAM module with privilege separation. The system supports:
 - K-of-N authentication (require K successful matches out of N attempts)
 - Rolling embedding buffer for improved accuracy
 - Both system-wide and per-user enrollment
@@ -14,13 +14,15 @@ A secure face authentication system for Linux, inspired by Windows Hello. Uses i
 ## Features
 
 ### Implemented
+- ✅ Native PAM module with challenge-response protocol
+- ✅ Privilege separation architecture (PAM + embedding service)
 - ✅ IR camera support with auto-detection
 - ✅ K-of-N matching strategy for robust authentication
 - ✅ Rolling buffer with embedding fusion
 - ✅ High-quality enrollment with multiple captures
-- ✅ PAM integration via pam_exec
 - ✅ INT8 model quantization for ~16+ FPS performance
 - ✅ Development mode for safe testing
+- ✅ Backward compatibility with pam_exec
 
 ### Planned (Phase 2)
 - 🔒 AES-256-GCM encryption for embeddings
@@ -32,23 +34,63 @@ A secure face authentication system for Linux, inspired by Windows Hello. Uses i
 
 ### Prerequisites
 
-- Rust 1.70+
+- Rust 1.70+ with workspace support
 - V4L2 compatible camera (preferably with IR support)
 - Linux with PAM support
+- ONNX Runtime compatible system
+- Models: `detect.onnx` and `compare.onnx` (see Models section below)
 
-### Quick Start
+### Complete Setup Guide
 
-1. **Clone and build:**
+#### Development Testing (Recommended First)
+
+1. **Clone and setup:**
 ```bash
 git clone https://github.com/yourusername/linuxSup.git
 cd linuxSup
-cargo build --release
 ```
 
-2. **Download required models:**
+2. **Verify models (REQUIRED):**
 ```bash
-cd models
-# Run the commands below to download the models
+# Ensure you have the correct models
+ls models/
+# Should show: detect.onnx compare.onnx
+# If missing, contact repository maintainer for model access
+```
+
+3. **Build workspace:**
+```bash
+# Build all components (main CLI, PAM module, embedding service)
+cargo build --release --all
+```
+
+4. **Test camera and detection:**
+```bash
+# Test camera access
+cargo run --bin linuxsup -- --dev test-camera
+
+# Test face detection
+cargo run --bin linuxsup -- --dev test-detection
+```
+
+5. **Test enrollment and authentication:**
+```bash
+# Enroll yourself (saves to ./dev_data/)
+cargo run --bin linuxsup -- --dev enroll --username testuser
+
+# Test authentication
+cargo run --bin linuxsup -- --dev test --username testuser
+```
+
+#### Production Installation
+
+Only proceed after development testing works:
+
+```bash
+# Install system-wide (requires models in place)
+sudo ./install.sh
+
+# Follow the installation prompts for PAM setup
 ```
 
 ### Camera Configuration
@@ -74,10 +116,10 @@ height = 480
 3. **Test camera capture:**
 ```bash
 # Normal mode (saves to current directory)
-cargo run -- test-camera
+cargo run --bin linuxsup -- test-camera
 
 # Development mode (saves to ./dev_data/captures/)
-cargo run -- --dev test-camera
+cargo run --bin linuxsup -- --dev test-camera
 ```
 
 ### Testing Face Detection
@@ -85,25 +127,25 @@ cargo run -- --dev test-camera
 1. **Basic detection test:**
 ```bash
 # Normal mode
-cargo run -- test-detection
+cargo run --bin linuxsup -- test-detection
 
 # Development mode with debug output
-cargo run -- --dev test-detection
+cargo run --bin linuxsup -- --dev test-detection
 ```
 
 2. **Enrollment:**
 ```bash
 # Normal mode (saves to system directories)
-cargo run -- enroll --username testuser
+cargo run --bin linuxsup -- enroll --username testuser
 
 # Development mode (saves to ./dev_data/)
-cargo run -- --dev enroll --username testuser
+cargo run --bin linuxsup -- --dev enroll --username testuser
 ```
 
 3. **Authentication test:**
 ```bash
 # Test authentication
-cargo run -- --dev test --username testuser
+cargo run --bin linuxsup -- --dev test --username testuser
 ```
 
 ### Development Mode
@@ -130,10 +172,10 @@ The `--dev` flag enables development mode for safe testing:
 **Example Commands:**
 ```bash
 # All commands support --dev flag
-cargo run -- --dev test-camera
-cargo run -- --dev test-detection
-cargo run -- --dev enroll --username alice
-cargo run -- --dev test --username alice
+cargo run --bin linuxsup -- --dev test-camera
+cargo run --bin linuxsup -- --dev test-detection
+cargo run --bin linuxsup -- --dev enroll --username alice
+cargo run --bin linuxsup -- --dev test --username alice
 ```
 
 ### Troubleshooting
@@ -156,44 +198,34 @@ cargo run -- --dev test --username alice
 
 ## Models
 
-### Face Detection - UltraFace
-Lightweight face detection model optimized for speed.
-- Model: `ultraface_640.onnx`
-- Input: 640x480 RGB image
-- Output: Face bounding boxes with confidence
+### Required Models
 
-### Face Recognition - ArcFace
-State-of-the-art face recognition model.
-- Model: `arcface_r100.onnx` 
-- Input: 112x112 face crop
-- Output: 512-dimensional embedding
+The system requires two ONNX models in the `models/` directory:
 
-### Download Models
+1. **Face Detection Model** (`detect.onnx`)
+   - YOLOv8-based face detection
+   - Input: 640x640 RGB image
+   - Output: Face bounding boxes with confidence
+
+2. **Face Recognition Model** (`compare.onnx`)
+   - ArcFace-based face recognition
+   - Input: 112x112 face crop
+   - Output: 512-dimensional embedding
+
+### Model Setup
 
 ```bash
-cd models
+# Verify you have the required models
+ls -la models/
+# Should show:
+# -rw-r--r-- 1 user user 12251037 detect.onnx
+# -rw-r--r-- 1 user user  4397715 compare.onnx
 
-# Clean up any existing models
-rm -f *.onnx
-
-# Download UltraFace detector
-echo "Downloading UltraFace model..."
-curl -L -o ultraface_640.onnx https://github.com/onnx/models/raw/main/validated/vision/body_analysis/ultraface/models/version-RFB-640.onnx
-
-# Download ArcFace recognizer (INT8 version for better performance)
-echo "Downloading ArcFace INT8 model..."
-curl -L -o arcface_r100.onnx https://github.com/onnx/models/raw/main/validated/vision/body_analysis/arcface/model/arcfaceresnet100-11-int8.onnx
-
-# Verify downloads (should show "data" type and file sizes)
-echo "Verifying downloads..."
-file *.onnx
-ls -lh *.onnx
-
-cd ..
+# Test model loading
+cargo run --bin linuxsup -- --dev test-detection
 ```
 
-
-https://vcipl-okstate.org/pbvs/bench/Data/07/download.html
+**Note**: These are proprietary models. Contact the repository maintainer for access. The system will not work without these models.
 
 ## Security Notice
 
@@ -212,10 +244,10 @@ sudo systemctl start linuxsup-embedding
 sudo systemctl enable linuxsup-embedding  # For automatic startup
 
 # Enroll yourself
-linuxsup enroll --username $USER
+linuxsup --system enroll --username $USER
 
 # Test authentication
-linuxsup test --username $USER
+linuxsup --system test --username $USER
 
 # Enable for sudo (choose one):
 # Option 1: Native PAM module (RECOMMENDED - more secure)

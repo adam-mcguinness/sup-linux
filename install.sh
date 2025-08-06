@@ -28,9 +28,23 @@ mkdir -p /var/lib/linuxsup/enrollment
 mkdir -p /usr/share/linuxsup/models
 mkdir -p /usr/local/bin
 
+# Validate models first
+echo "Checking for required models..."
+if [ ! -f "models/detect.onnx" ] || [ ! -f "models/compare.onnx" ]; then
+    echo "❌ ERROR: Missing required models!"
+    echo "   Required files: models/detect.onnx, models/compare.onnx"
+    echo "   Contact repository maintainer for model access."
+    exit 1
+fi
+echo "✅ Models found: detect.onnx, compare.onnx"
+
 # Build the project
 echo "Building LinuxSup..."
-cargo build --release --all
+if ! cargo build --release --all; then
+    echo "❌ Build failed. Please check error messages above."
+    exit 1
+fi
+echo "✅ Build successful"
 
 # Copy binaries
 echo "Installing binaries..."
@@ -66,14 +80,16 @@ fi
 mkdir -p /lib/security
 
 # Build and install PAM module
-echo "Building PAM module..."
-if [ -f "pam_module/target/release/libpam_linuxsup.so" ]; then
-    echo "Installing PAM module..."
-    cp pam_module/target/release/libpam_linuxsup.so /lib/security/pam_linuxsup.so
+echo "Installing PAM module..."
+if [ -f "target/release/libpam_linuxsup.so" ]; then
+    echo "Installing native PAM module..."
+    cp target/release/libpam_linuxsup.so /lib/security/pam_linuxsup.so
     chmod 644 /lib/security/pam_linuxsup.so
-    echo "PAM module installed successfully"
+    echo "✅ Native PAM module installed successfully"
+    echo "   Use examples/pam.d/sudo-with-face-native for secure authentication"
 else
-    echo "⚠️  PAM module not built. Using pam_exec fallback."
+    echo "⚠️  Native PAM module not found. Using pam_exec fallback."
+    echo "   Run 'cargo build --release --all' to build the native module."
     echo "   For production use, the native PAM module is recommended."
 fi
 

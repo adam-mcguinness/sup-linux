@@ -1,4 +1,5 @@
 use crate::{
+    ascii_preview::{AsciiRenderer, clear_screen, check_for_escape, show_capture_flash},
     camera::Camera,
     config::Config,
     detector::{FaceDetector, FaceBox},
@@ -11,9 +12,11 @@ use crate::{
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::io::{self, Write};
 use image::{DynamicImage, Rgb};
 use imageproc::drawing::draw_hollow_rect_mut;
 use imageproc::rect::Rect;
+use crossterm::terminal;
 
 pub struct FaceAuth {
     camera: Camera,
@@ -277,6 +280,149 @@ impl FaceAuth {
 
         Ok(())
     }
+
+    pub fn enroll_with_preview(&mut self, username: &str) -> Result<()> {
+        
+        println!("Starting enhanced enrollment for '{}'", username);
+        println!("We'll capture multiple images as you move your head for better recognition");
+        
+        // Create enrollment images directory for this user
+        let enrollment_dir = self.store.get_enrollment_images_dir(username)?;
+        std::fs::create_dir_all(&enrollment_dir)?;
+        
+        let total_captures = self.config.enrollment.num_captures.unwrap_or(5);
+        let capture_interval = Duration::from_millis(
+            self.config.enrollment.capture_interval_ms.unwrap_or(2000)
+        );
+        let min_quality = self.config.enrollment.min_enrollment_quality;
+        
+        let mut embeddings = Vec::new();
+        let mut quality_scores = Vec::new();
+        let mut captured = 0;
+        let mut last_capture_time = Instant::now();
+        
+        // Setup terminal for ASCII preview
+        terminal::enable_raw_mode()
+            .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to enable raw mode: {}", e)))?;
+        
+        // Create ASCII renderer
+        let renderer = AsciiRenderer::new(
+            self.config.enrollment.ascii_width,
+            self.config.enrollment.ascii_height
+        );
+        
+        // Start camera session for streaming
+        let mut session = self.camera.start_session()?;
+        
+        let result = (|| -> Result<()> {
+            // Clear screen once at the start
+            clear_screen().ok();
+            
+            loop {
+                // Capture frame from existing session
+                let frame = session.capture_frame()?;
+                let detected_faces = self.detector.detect(&frame)?;
+                
+                // Render ASCII preview
+                let ascii = renderer.render_frame_with_progress(
+                    &frame,
+                    &detected_faces,
+                    captured,
+                    total_captures
+                );
+                
+                // Just move cursor to home and overwrite - no clear
+                crossterm::execute!(
+                    io::stdout(),
+                    crossterm::cursor::MoveTo(0, 0),
+                    crossterm::style::Print(&ascii),
+                    crossterm::cursor::MoveTo(0, (renderer.height() + 2) as u16),
+                    crossterm::style::Print("Press ESC to cancel enrollment                    ")  // Extra spaces to clear any leftover text
+                ).ok();
+                
+                // Check for ESC key
+                if check_for_escape()
+                    .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to check input: {}", e)))? {
+                    return Err(FaceAuthError::Other(anyhow::anyhow!("Enrollment cancelled by user")));
+                }
+                
+                // Auto-capture logic
+                if !detected_faces.is_empty() {
+                    let face = &detected_faces[0];
+                    
+                    // Check if enough time has passed since last capture
+                    if last_capture_time.elapsed() > capture_interval {
+                        // Calculate quality metrics
+                        let quality = QualityMetrics::calculate(&frame, face);
+                        
+                        // Check if quality meets requirements
+                        if quality.meets_minimum_requirements(min_quality) {
+                            // Get embedding
+                            let embedding = self.recognizer.get_embedding(&frame, face)?;
+                            
+                            // Save enrollment image
+                            let image_path = enrollment_dir.join(format!("enroll_{}.jpg", captured));
+                            frame.save(&image_path)?;
+                            
+                            embeddings.push(embedding);
+                            quality_scores.push(quality.overall_score);
+                            captured += 1;
+                            last_capture_time = Instant::now();
+                            
+                            // Show capture flash
+                            show_capture_flash();
+                        }
+                    }
+                }
+                
+                // Check if we've captured enough images
+                if captured >= total_captures {
+                    break;
+                }
+                
+                // Small delay to prevent CPU spinning
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            
+            // Check embedding consistency
+            let consistency = calculate_embedding_consistency(&embeddings);
+            println!("\n\nEmbedding consistency: {:.2}", consistency);
+            
+            if consistency < 0.7 {
+                println!("⚠ Warning: Low consistency between captures. Consider re-enrolling in better conditions.");
+            }
+            
+            // Calculate averaged embedding if enabled
+            let averaged_embedding = if self.config.enrollment.store_averaged_embedding {
+                Some(average_embeddings(&embeddings))
+            } else {
+                None
+            };
+            
+            let user_data = UserData {
+                version: 1,
+                username: username.to_string(),
+                embeddings,
+                averaged_embedding,
+                embedding_qualities: Some(quality_scores),
+            };
+            
+            self.store.save_user_data(&user_data)?;
+            println!("\n✓ User '{}' enrolled successfully with {} high-quality face captures!", 
+                     username, user_data.embeddings.len());
+            
+            Ok(())
+        })();
+        
+        // Clear screen before restoring terminal
+        clear_screen().ok();
+        
+        // Restore terminal
+        terminal::disable_raw_mode()
+            .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to disable raw mode: {}", e)))?;
+        
+        result
+    }
 }
 
 // Public functions for CLI
@@ -312,7 +458,14 @@ pub fn test_detection() -> Result<()> {
 
 pub fn enroll_user(username: &str) -> Result<()> {
     let mut auth = FaceAuth::new()?;
-    auth.enroll(username)
+    let config = Config::load()?;
+    
+    // Use ASCII preview enrollment if enabled
+    if config.enrollment.enable_ascii_preview.unwrap_or(true) {
+        auth.enroll_with_preview(username)
+    } else {
+        auth.enroll(username)
+    }
 }
 
 pub fn authenticate_user(username: &str) -> Result<bool> {
@@ -458,7 +611,14 @@ pub fn test_detection_dev(dev_mode: &DevMode) -> Result<()> {
 
 pub fn enroll_user_dev(username: &str, dev_mode: &DevMode) -> Result<()> {
     let mut auth = FaceAuth::new_with_dev_mode(dev_mode.clone())?;
-    auth.enroll(username)
+    let config = Config::load()?;
+    
+    // Use ASCII preview enrollment if enabled
+    if config.enrollment.enable_ascii_preview.unwrap_or(true) {
+        auth.enroll_with_preview(username)
+    } else {
+        auth.enroll(username)
+    }
 }
 
 pub fn authenticate_user_dev(username: &str, dev_mode: &DevMode) -> Result<bool> {

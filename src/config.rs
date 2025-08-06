@@ -96,9 +96,22 @@ pub struct EnrollmentConfig {
     pub capture_quality_metrics: bool,
     #[serde(default = "default_enrollment_quality")]
     pub min_enrollment_quality: f32,
+    #[serde(default = "default_num_captures")]
+    pub num_captures: Option<usize>,
+    #[serde(default = "default_capture_interval")]
+    pub capture_interval_ms: Option<u64>,
+    #[serde(default = "default_true_option")]
+    pub enable_ascii_preview: Option<bool>,
+    #[serde(default)]
+    pub ascii_width: Option<usize>,
+    #[serde(default)]
+    pub ascii_height: Option<usize>,
 }
 
 fn default_enrollment_quality() -> f32 { 0.7 }
+fn default_num_captures() -> Option<usize> { Some(5) }
+fn default_capture_interval() -> Option<u64> { Some(2000) }
+fn default_true_option() -> Option<bool> { Some(true) }
 
 
 impl Config {
