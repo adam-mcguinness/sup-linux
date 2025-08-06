@@ -1,4 +1,4 @@
-# Face Authentication Configuration
+# Face Authentication Configuration - System Version
 
 [camera]
 # Camera device index (0 for default camera, 51 for Logitech BRIO IR camera, 999 for auto-detect)
@@ -12,10 +12,10 @@ warmup_frames = 3
 warmup_delay_ms = 100
 
 [models]
-# Path to face detection model
-detector_path = "models/detect.onnx"
+# Path to face detection model - SYSTEM PATHS
+detector_path = "/usr/share/linuxsup/models/detect.onnx"
 # Path to face recognition model
-recognizer_path = "models/compare.onnx"
+recognizer_path = "/usr/share/linuxsup/models/compare.onnx"
 
 [auth]
 # Similarity threshold for face matching (0.0-1.0, higher = stricter)

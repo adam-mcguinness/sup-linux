@@ -37,17 +37,23 @@ if [ -f /etc/systemd/system/linuxsup-embedding.service ]; then
     systemctl daemon-reload
 fi
 
-# Remove binaries
+# Remove binaries and wrappers
 echo "Removing binaries..."
 rm -f /usr/local/bin/linuxsup
-rm -f /usr/local/bin/linuxsup-auth
+rm -f /usr/local/bin/linuxsup.bin
 rm -f /usr/local/bin/linuxsup-embedding-service
-rm -f /usr/local/bin/linuxsup-pam-wrapper
+rm -f /usr/local/bin/linuxsup-embedding-service.bin
 
 # Remove PAM module if it exists
 if [ -f /lib/security/pam_linuxsup.so ]; then
     echo "Removing PAM module..."
     rm -f /lib/security/pam_linuxsup.so
+fi
+
+# Remove ONNX Runtime libraries from LinuxSup directory
+if [ -d /usr/local/lib/linuxsup ]; then
+    echo "Removing ONNX Runtime libraries..."
+    rm -rf /usr/local/lib/linuxsup
 fi
 
 # Remove linuxsup user if it exists
@@ -77,9 +83,7 @@ echo "⚠️  IMPORTANT: Check your PAM configuration!"
 echo "   If you modified /etc/pam.d/sudo or other PAM files,"
 echo "   you must manually remove the LinuxSup entries."
 echo
-echo "   Look for lines containing:"
-echo "   - pam_linuxsup.so"
-echo "   - pam_exec.so.*linuxsup-pam-wrapper"
+echo "   Look for lines containing: pam_linuxsup.so"
 echo
 
 echo "Uninstall complete!"

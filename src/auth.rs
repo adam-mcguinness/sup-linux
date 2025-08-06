@@ -1,5 +1,5 @@
 use crate::{
-    ascii_preview::{AsciiRenderer, clear_screen, check_for_escape, show_capture_flash},
+    ascii_preview::{AsciiRenderer, clear_screen, check_for_escape},
     camera::Camera,
     config::Config,
     detector::{FaceDetector, FaceBox},
@@ -11,7 +11,6 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::io::{self, Write};
 use image::{DynamicImage, Rgb};
 use imageproc::drawing::draw_hollow_rect_mut;
@@ -24,24 +23,10 @@ pub struct FaceAuth {
     recognizer: FaceRecognizer,
     store: UserStore,
     config: Config,
-    dev_mode: DevMode,
+    _dev_mode: DevMode,
 }
 
 impl FaceAuth {
-    pub fn new() -> Result<Self> {
-        let config = Config::load()?;
-        let dev_mode = DevMode::new(false)?;
-
-        Ok(Self {
-            camera: Camera::new(&config)?,
-            detector: FaceDetector::new(&config)?,
-            recognizer: FaceRecognizer::new(&config)?,
-            store: UserStore::new()?,
-            config,
-            dev_mode,
-        })
-    }
-    
     pub fn new_with_dev_mode(dev_mode: DevMode) -> Result<Self> {
         let config = Config::load()?;
 
@@ -51,7 +36,7 @@ impl FaceAuth {
             recognizer: FaceRecognizer::new(&config)?,
             store: UserStore::new_with_dev_mode(&dev_mode)?,
             config,
-            dev_mode,
+            _dev_mode: dev_mode,
         })
     }
 
@@ -315,29 +300,75 @@ impl FaceAuth {
         let mut session = self.camera.start_session()?;
         
         let result = (|| -> Result<()> {
-            // Clear screen once at the start
+            // Setup screen once at the start
             clear_screen().ok();
             
+            // Hide cursor for cleaner display
+            crossterm::execute!(
+                io::stdout(),
+                crossterm::cursor::Hide
+            ).ok();
+            
+            // Keep track of last valid frame and faces
+            let mut last_valid_frame = None;
+            let mut last_faces = Vec::new();
+            
             loop {
-                // Capture frame from existing session
+                // Capture new frame
                 let frame = session.capture_frame()?;
+                
+                // Check if frame is too dark (likely invalid)
+                let is_valid_frame = {
+                    let gray = frame.to_luma8();
+                    let (width, height) = gray.dimensions();
+                    let mut total_brightness: u64 = 0;
+                    let mut pixel_count = 0;
+                    
+                    // Sample pixels in a grid pattern for efficiency
+                    let step = 20; // Sample every 20th pixel for speed
+                    for y in (0..height).step_by(step) {
+                        for x in (0..width).step_by(step) {
+                            total_brightness += gray.get_pixel(x, y)[0] as u64;
+                            pixel_count += 1;
+                        }
+                    }
+                    
+                    pixel_count > 0 && (total_brightness / pixel_count) > 15
+                };
+                
+                // Skip dark/invalid frames entirely
+                if !is_valid_frame && last_valid_frame.is_some() {
+                    continue;
+                }
+                
+                // Store valid frame immediately
+                if is_valid_frame {
+                    last_valid_frame = Some(frame.clone());
+                }
+                
+                // Process face detection
                 let detected_faces = self.detector.detect(&frame)?;
                 
-                // Render ASCII preview
+                // Update faces if we found any
+                if !detected_faces.is_empty() {
+                    last_faces = detected_faces.clone();
+                }
+                
+                // Render the frame
                 let ascii = renderer.render_frame_with_progress(
                     &frame,
-                    &detected_faces,
+                    &last_faces,  // Use last known faces if current detection failed
                     captured,
                     total_captures
                 );
                 
-                // Just move cursor to home and overwrite - no clear
+                // Update display
                 crossterm::execute!(
                     io::stdout(),
                     crossterm::cursor::MoveTo(0, 0),
                     crossterm::style::Print(&ascii),
                     crossterm::cursor::MoveTo(0, (renderer.height() + 2) as u16),
-                    crossterm::style::Print("Press ESC to cancel enrollment                    ")  // Extra spaces to clear any leftover text
+                    crossterm::style::Print("Press ESC to cancel enrollment                    ")
                 ).ok();
                 
                 // Check for ESC key
@@ -347,7 +378,7 @@ impl FaceAuth {
                 }
                 
                 // Auto-capture logic
-                if !detected_faces.is_empty() {
+                if !detected_faces.is_empty() && is_valid_frame {
                     let face = &detected_faces[0];
                     
                     // Check if enough time has passed since last capture
@@ -368,9 +399,6 @@ impl FaceAuth {
                             quality_scores.push(quality.overall_score);
                             captured += 1;
                             last_capture_time = Instant::now();
-                            
-                            // Show capture flash
-                            show_capture_flash();
                         }
                     }
                 }
@@ -379,17 +407,79 @@ impl FaceAuth {
                 if captured >= total_captures {
                     break;
                 }
-                
-                // Small delay to prevent CPU spinning
-                std::thread::sleep(Duration::from_millis(50));
             }
             
-            // Check embedding consistency
-            let consistency = calculate_embedding_consistency(&embeddings);
-            println!("\n\nEmbedding consistency: {:.2}", consistency);
+            // Clear the ASCII display before showing results
+            clear_screen().ok();
             
-            if consistency < 0.7 {
-                println!("⚠ Warning: Low consistency between captures. Consider re-enrolling in better conditions.");
+            // Build the entire metrics display as a single string with \r\n
+            let mut output = String::new();
+            
+            output.push_str("\r\n╔══════════════════════════════════════════════════════╗\r\n");
+            output.push_str("║           ENROLLMENT COMPLETE - RESULTS              ║\r\n");
+            output.push_str("╚══════════════════════════════════════════════════════╝\r\n\r\n");
+            
+            output.push_str(&format!("User: {}\r\n", username));
+            output.push_str(&format!("Captures completed: {}/{}\r\n\r\n", captured, total_captures));
+            
+            // Display quality scores for each capture
+            if !quality_scores.is_empty() {
+                output.push_str("📊 Quality Scores per Capture:\r\n");
+                let mut total_quality = 0.0;
+                for (i, score) in quality_scores.iter().enumerate() {
+                    let bar_length = (score * 20.0) as usize;
+                    let bar = "█".repeat(bar_length);
+                    let empty = "░".repeat(20_usize.saturating_sub(bar_length));
+                    output.push_str(&format!("  Capture {}: [{}{}] {:.2}%\r\n", 
+                             i + 1, bar, empty, score * 100.0));
+                    total_quality += score;
+                }
+                
+                let avg_quality = total_quality / quality_scores.len() as f32;
+                output.push_str(&format!("\r\n📈 Average Quality Score: {:.1}%\r\n", avg_quality * 100.0));
+                
+                // Quality assessment
+                let quality_rating = if avg_quality >= 0.8 {
+                    "Excellent ⭐⭐⭐⭐⭐"
+                } else if avg_quality >= 0.7 {
+                    "Good ⭐⭐⭐⭐"
+                } else if avg_quality >= 0.6 {
+                    "Acceptable ⭐⭐⭐"
+                } else {
+                    "Poor ⭐⭐"
+                };
+                output.push_str(&format!("   Rating: {}\r\n", quality_rating));
+            }
+            
+            // Check embedding diversity/robustness
+            let consistency = calculate_embedding_consistency(&embeddings);
+            output.push_str(&format!("\r\n🔄 Enrollment Robustness: {:.1}%\r\n", consistency * 100.0));
+            
+            let consistency_rating = if consistency >= 0.85 {
+                "Excellent - Optimal variation for robust recognition"
+            } else if consistency >= 0.75 {
+                "Good - Good balance of consistency and variation"
+            } else if consistency >= 0.65 {
+                "Acceptable - Adequate for recognition"
+            } else if consistency < 0.5 {
+                "Too similar - Try moving head more between captures"
+            } else {
+                "Too different - Keep movements smaller"
+            };
+            output.push_str(&format!("   {}\r\n", consistency_rating));
+            
+            if consistency < 0.65 {
+                output.push_str("\r\n⚠️  Warning: Enrollment could be more robust.\r\n");
+                output.push_str("   Suggestions:\r\n");
+                if consistency < 0.5 {
+                    output.push_str("   • Move your head slightly between captures\r\n");
+                    output.push_str("   • Try different subtle angles\r\n");
+                    output.push_str("   • Vary your expression slightly\r\n");
+                } else {
+                    output.push_str("   • Keep movements more subtle\r\n");
+                    output.push_str("   • Maintain consistent lighting\r\n");
+                    output.push_str("   • Keep the same general expression\r\n");
+                }
             }
             
             // Calculate averaged embedding if enabled
@@ -408,14 +498,25 @@ impl FaceAuth {
             };
             
             self.store.save_user_data(&user_data)?;
-            println!("\n✓ User '{}' enrolled successfully with {} high-quality face captures!", 
-                     username, user_data.embeddings.len());
+            
+            output.push_str(&format!("\r\n✅ User '{}' enrolled successfully!\r\n", username));
+            output.push_str(&format!("   • {} high-quality face captures saved\r\n", user_data.embeddings.len()));
+            output.push_str("   • Images saved in enrollment directory\r\n");
+            
+            output.push_str("\r\n══════════════════════════════════════════════════════\r\n");
+            
+            // Print everything at once
+            print!("{}", output);
+            io::stdout().flush().ok();
             
             Ok(())
         })();
         
-        // Clear screen before restoring terminal
-        clear_screen().ok();
+        // Restore cursor before restoring terminal
+        crossterm::execute!(
+            io::stdout(),
+            crossterm::cursor::Show
+        ).ok();
         
         // Restore terminal
         terminal::disable_raw_mode()
@@ -423,54 +524,6 @@ impl FaceAuth {
         
         result
     }
-}
-
-// Public functions for CLI
-pub fn test_camera() -> Result<()> {
-    let config = Config::load()?;
-    let mut camera = Camera::new(&config)?;
-    let img = camera.capture_frame()?;
-    img.save("test_capture.jpg")?;
-    println!("Saved test image to test_capture.jpg");
-    Ok(())
-}
-
-pub fn test_detection() -> Result<()> {
-    let config = Config::load()?;
-    let mut camera = Camera::new(&config)?;
-    let detector = FaceDetector::new(&config)?;
-
-    println!("Capturing frame from camera {}...", config.camera.device_index);
-    let frame = camera.capture_frame()?;
-    frame.save("detection_test.jpg")?;
-
-    println!("Detecting faces...");
-    let faces = detector.detect(&frame)?;
-
-    println!("Found {} face(s)", faces.len());
-    for (i, face) in faces.iter().enumerate() {
-        println!("Face {}: ({:.0}, {:.0}) to ({:.0}, {:.0}) confidence: {:.2}",
-                 i, face.x1, face.y1, face.x2, face.y2, face.confidence);
-    }
-
-    Ok(())
-}
-
-pub fn enroll_user(username: &str) -> Result<()> {
-    let mut auth = FaceAuth::new()?;
-    let config = Config::load()?;
-    
-    // Use ASCII preview enrollment if enabled
-    if config.enrollment.enable_ascii_preview.unwrap_or(true) {
-        auth.enroll_with_preview(username)
-    } else {
-        auth.enroll(username)
-    }
-}
-
-pub fn authenticate_user(username: &str) -> Result<bool> {
-    let mut auth = FaceAuth::new()?;
-    auth.authenticate(username)
 }
 
 // Dev mode versions of public functions
@@ -610,67 +663,97 @@ pub fn test_detection_dev(dev_mode: &DevMode) -> Result<()> {
 }
 
 pub fn enroll_user_dev(username: &str, dev_mode: &DevMode) -> Result<()> {
-    let mut auth = FaceAuth::new_with_dev_mode(dev_mode.clone())?;
-    let config = Config::load()?;
-    
-    // Use ASCII preview enrollment if enabled
-    if config.enrollment.enable_ascii_preview.unwrap_or(true) {
-        auth.enroll_with_preview(username)
+    // If in dev mode, do local enrollment
+    if dev_mode.is_enabled() {
+        let mut auth = FaceAuth::new_with_dev_mode(dev_mode.clone())?;
+        let config = Config::load()?;
+        
+        // Use ASCII preview enrollment if enabled
+        if config.enrollment.enable_ascii_preview.unwrap_or(true) {
+            auth.enroll_with_preview(username)
+        } else {
+            auth.enroll(username)
+        }
     } else {
-        auth.enroll(username)
+        // In production mode, use the service
+        enroll_via_service(username)
+    }
+}
+
+// Enrollment via the embedding service (for production)
+fn enroll_via_service(username: &str) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    use std::io::{Read, Write};
+    use crate::protocol::{Request, Response, EnrollRequest, SOCKET_PATH};
+    
+    println!("Connecting to embedding service...");
+    
+    // Connect to service
+    let mut stream = UnixStream::connect(SOCKET_PATH)
+        .map_err(|e| FaceAuthError::Other(anyhow::anyhow!(
+            "Failed to connect to embedding service: {}. Is the service running?", e
+        )))?;
+    
+    // Set timeout (longer for enrollment)
+    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    
+    // Create enrollment request
+    let request = Request::Enroll(EnrollRequest {
+        username: username.to_string(),
+    });
+    
+    // Serialize request
+    let request_data = bincode::serialize(&request)
+        .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+    let request_len = (request_data.len() as u32).to_le_bytes();
+    
+    // Send request
+    stream.write_all(&request_len)?;
+    stream.write_all(&request_data)?;
+    stream.flush()?;
+    
+    println!("📸 Starting enrollment - please look at the camera");
+    println!("The service will capture 5 images (this takes about 60 seconds)");
+    println!("Please:");
+    println!("  • Keep your face in view of the camera");
+    println!("  • Move your head slightly between captures");
+    println!("  • Maintain good lighting");
+    println!("\nProcessing...");
+    
+    // Read response length
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let response_len = u32::from_le_bytes(len_buf) as usize;
+    
+    // Read response
+    let mut response_buf = vec![0u8; response_len];
+    stream.read_exact(&mut response_buf)?;
+    
+    // Deserialize response
+    let response: Response = bincode::deserialize(&response_buf)
+        .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to deserialize response: {}", e)))?;
+    
+    match response {
+        Response::Enroll(enroll_resp) => {
+            if enroll_resp.success {
+                println!("✅ {}", enroll_resp.message);
+                Ok(())
+            } else {
+                Err(FaceAuthError::Other(anyhow::anyhow!(enroll_resp.message)))
+            }
+        }
+        Response::Error(msg) => {
+            Err(FaceAuthError::Other(anyhow::anyhow!("Service error: {}", msg)))
+        }
+        _ => {
+            Err(FaceAuthError::Other(anyhow::anyhow!("Unexpected response type")))
+        }
     }
 }
 
 pub fn authenticate_user_dev(username: &str, dev_mode: &DevMode) -> Result<bool> {
     let mut auth = FaceAuth::new_with_dev_mode(dev_mode.clone())?;
-    auth.authenticate(username)
-}
-
-pub fn authenticate_user_system(username: &str, paths: &crate::paths::Paths) -> Result<bool> {
-    let config = Config::load_from_path(&paths.config_file())?;
-    
-    // Try system store first, then user store
-    let system_store = UserStore::new_with_paths(
-        PathBuf::from("/var/lib/linuxsup/users"),
-        PathBuf::from("/var/lib/linuxsup/enrollment"),
-    )?;
-    
-    // Check if user exists in system store
-    let store = if system_store.get_user(username).is_ok() {
-        system_store
-    } else {
-        // Try user's home directory
-        if let Some(home) = dirs::home_dir() {
-            let user_store = UserStore::new_with_paths(
-                home.join(".local/share/linuxsup/users"),
-                home.join(".local/share/linuxsup/enrollment"),
-            )?;
-            
-            // Check if user exists in user store
-            if user_store.get_user(username).is_ok() {
-                user_store
-            } else {
-                // Return system store (will fail with UserNotFound)
-                system_store
-            }
-        } else {
-            system_store
-        }
-    };
-    
-    let camera = Camera::new(&config)?;
-    let detector = FaceDetector::new_with_model_path(&config, &paths.models_dir())?;
-    let recognizer = FaceRecognizer::new_with_model_path(&config, &paths.models_dir())?;
-    
-    let mut auth = FaceAuth {
-        camera,
-        detector,
-        recognizer,
-        store,
-        config,
-        dev_mode: DevMode::new(false)?,
-    };
-    
     auth.authenticate(username)
 }
 

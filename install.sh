@@ -23,12 +23,42 @@ fi
 # Create directories
 echo "Creating system directories..."
 mkdir -p /etc/linuxsup
+mkdir -p /var/lib/linuxsup
 mkdir -p /var/lib/linuxsup/users
 mkdir -p /var/lib/linuxsup/enrollment
 mkdir -p /usr/share/linuxsup/models
 mkdir -p /usr/local/bin
+mkdir -p /usr/local/lib/linuxsup
 
-# Validate models first
+# Check if binaries are built
+echo "Checking for required binaries..."
+REQUIRED_BINARIES=(
+    "target/release/linuxsup"
+    "target/release/linuxsup-embedding-service"
+    "target/release/libpam_linuxsup.so"
+)
+
+MISSING_BINARIES=()
+for binary in "${REQUIRED_BINARIES[@]}"; do
+    if [ ! -f "$binary" ]; then
+        MISSING_BINARIES+=("$binary")
+    fi
+done
+
+if [ ${#MISSING_BINARIES[@]} -ne 0 ]; then
+    echo "❌ ERROR: Required binaries not found!"
+    echo "   Missing:"
+    for binary in "${MISSING_BINARIES[@]}"; do
+        echo "   - $binary"
+    done
+    echo
+    echo "   Please run './build.sh' first to build the project."
+    echo "   Then run 'sudo ./install.sh' to install."
+    exit 1
+fi
+echo "✅ All required binaries found"
+
+# Validate models
 echo "Checking for required models..."
 if [ ! -f "models/detect.onnx" ] || [ ! -f "models/compare.onnx" ]; then
     echo "❌ ERROR: Missing required models!"
@@ -38,29 +68,51 @@ if [ ! -f "models/detect.onnx" ] || [ ! -f "models/compare.onnx" ]; then
 fi
 echo "✅ Models found: detect.onnx, compare.onnx"
 
-# Build the project
-echo "Building LinuxSup..."
-if ! cargo build --release --all; then
-    echo "❌ Build failed. Please check error messages above."
-    exit 1
-fi
-echo "✅ Build successful"
-
 # Copy binaries
 echo "Installing binaries..."
 cp target/release/linuxsup /usr/local/bin/
-cp target/release/linuxsup-auth /usr/local/bin/
 cp target/release/linuxsup-embedding-service /usr/local/bin/
-cp linuxsup-pam-wrapper /usr/local/bin/
 chmod 755 /usr/local/bin/linuxsup
-chmod 755 /usr/local/bin/linuxsup-auth
 chmod 755 /usr/local/bin/linuxsup-embedding-service
-chmod 755 /usr/local/bin/linuxsup-pam-wrapper
 
-# Copy configuration
+# Install ONNX Runtime library to LinuxSup directory
+echo "Installing ONNX Runtime library..."
+if [ -f "target/release/libonnxruntime.so" ]; then
+    cp target/release/libonnxruntime.so* /usr/local/lib/linuxsup/
+    # Create wrapper scripts that set LD_LIBRARY_PATH
+    cat > /usr/local/bin/linuxsup.tmp << 'EOF'
+#!/bin/bash
+export LD_LIBRARY_PATH="/usr/local/lib/linuxsup:$LD_LIBRARY_PATH"
+exec /usr/local/bin/linuxsup.bin "$@"
+EOF
+    cat > /usr/local/bin/linuxsup-embedding-service.tmp << 'EOF'
+#!/bin/bash
+export LD_LIBRARY_PATH="/usr/local/lib/linuxsup:$LD_LIBRARY_PATH"
+exec /usr/local/bin/linuxsup-embedding-service.bin "$@"
+EOF
+    # Move binaries to .bin and wrappers to main names
+    mv /usr/local/bin/linuxsup /usr/local/bin/linuxsup.bin
+    mv /usr/local/bin/linuxsup-embedding-service /usr/local/bin/linuxsup-embedding-service.bin
+    mv /usr/local/bin/linuxsup.tmp /usr/local/bin/linuxsup
+    mv /usr/local/bin/linuxsup-embedding-service.tmp /usr/local/bin/linuxsup-embedding-service
+    chmod 755 /usr/local/bin/linuxsup
+    chmod 755 /usr/local/bin/linuxsup-embedding-service
+    echo "✅ ONNX Runtime installed to /usr/local/lib/linuxsup/"
+else
+    echo "⚠️  ONNX Runtime not found in build directory"
+    echo "   The application may not work correctly"
+fi
+
+# Copy configuration (use system version with absolute paths)
 echo "Installing configuration..."
 if [ ! -f /etc/linuxsup/face-auth.toml ]; then
-    cp configs/face-auth.toml /etc/linuxsup/
+    # Use system config with absolute paths for models
+    if [ -f configs/face-auth-system.toml ]; then
+        cp configs/face-auth-system.toml /etc/linuxsup/face-auth.toml
+    else
+        # Fall back to regular config if system version doesn't exist
+        cp configs/face-auth.toml /etc/linuxsup/face-auth.toml
+    fi
     chmod 644 /etc/linuxsup/face-auth.toml
 else
     echo "Config file already exists, skipping..."
@@ -86,18 +138,18 @@ if [ -f "target/release/libpam_linuxsup.so" ]; then
     cp target/release/libpam_linuxsup.so /lib/security/pam_linuxsup.so
     chmod 644 /lib/security/pam_linuxsup.so
     echo "✅ Native PAM module installed successfully"
-    echo "   Use examples/pam.d/sudo-with-face-native for secure authentication"
 else
-    echo "⚠️  Native PAM module not found. Using pam_exec fallback."
-    echo "   Run 'cargo build --release --all' to build the native module."
-    echo "   For production use, the native PAM module is recommended."
+    echo "❌ ERROR: Native PAM module not found!"
+    echo "   The PAM module is required for authentication."
+    echo "   Run 'cargo build --release --all' to build all components."
+    exit 1
 fi
 
-# Create linuxsup user for service
+# Create linuxsup user for service (no group needed since service handles everything)
 if ! id -u linuxsup >/dev/null 2>&1; then
-    echo "Creating linuxsup user..."
+    echo "Creating linuxsup service user..."
     useradd -r -s /bin/false -d /nonexistent -c "LinuxSup Service" linuxsup
-    usermod -a -G video linuxsup
+    usermod -a -G video linuxsup  # Need video group for camera access
 fi
 
 # Install systemd service
@@ -113,9 +165,10 @@ fi
 echo "Creating installation manifest..."
 cat > /var/lib/linuxsup/.installed_files <<EOF
 /usr/local/bin/linuxsup
-/usr/local/bin/linuxsup-auth
+/usr/local/bin/linuxsup.bin
 /usr/local/bin/linuxsup-embedding-service
-/usr/local/bin/linuxsup-pam-wrapper
+/usr/local/bin/linuxsup-embedding-service.bin
+/usr/local/lib/linuxsup
 /lib/security/pam_linuxsup.so
 /etc/systemd/system/linuxsup-embedding.service
 /etc/linuxsup
@@ -123,124 +176,57 @@ cat > /var/lib/linuxsup/.installed_files <<EOF
 /usr/share/linuxsup
 EOF
 
-# Set permissions
+# Set permissions for LinuxSup directories
 echo "Setting permissions..."
-chmod 700 /var/lib/linuxsup
+# All data directories owned exclusively by service user
+chown -R linuxsup:linuxsup /var/lib/linuxsup
+chmod 700 /var/lib/linuxsup  # Only service can access
 chmod 700 /var/lib/linuxsup/users
-chmod 755 /var/lib/linuxsup/enrollment
+chmod 700 /var/lib/linuxsup/enrollment
+
+# Config directory - readable by all
 chmod 755 /etc/linuxsup
+
+# Models directory - readable by all
 chmod 755 /usr/share/linuxsup
 
-# Create example PAM configurations
-echo "Creating example PAM configurations..."
-mkdir -p examples/pam.d
-
-# Sudo configuration (Native PAM module - RECOMMENDED)
-cat > examples/pam.d/sudo-with-face-native <<'EOF'
-#%PAM-1.0
-# LinuxSup face authentication for sudo (Native PAM module)
-# Copy this file to /etc/pam.d/sudo to enable
-
-# Face authentication (optional - falls back to password)
-auth    sufficient    pam_linuxsup.so
-
-# Default sudo authentication
-@include common-auth
-@include common-account
-@include common-session-noninteractive
-EOF
-
-# Sudo configuration (pam_exec fallback)
-cat > examples/pam.d/sudo-with-face <<'EOF'
-#%PAM-1.0
-# LinuxSup face authentication for sudo (pam_exec fallback)
-# Copy this file to /etc/pam.d/sudo to enable
-
-# Face authentication (optional - falls back to password)
-auth    sufficient    pam_exec.so    quiet    stdout    /usr/local/bin/linuxsup-pam-wrapper
-
-# Default sudo authentication
-@include common-auth
-@include common-account
-@include common-session-noninteractive
-EOF
-
-# GDM configuration
-cat > examples/pam.d/gdm-password-with-face <<'EOF'
-#%PAM-1.0
-# LinuxSup face authentication for GNOME login
-# Copy this file to /etc/pam.d/gdm-password to enable
-
-# Face authentication first
-auth    sufficient    pam_exec.so    quiet    stdout    /usr/local/bin/linuxsup-pam-wrapper
-
-# Fall back to standard authentication
-auth    requisite     pam_nologin.so
-auth    required      pam_succeed_if.so user != root quiet_success
-@include common-auth
-auth    optional      pam_gnome_keyring.so
-@include common-account
-@include common-session
-session optional      pam_gnome_keyring.so auto_start
-@include common-password
-EOF
-
-# SDDM configuration  
-cat > examples/pam.d/sddm-with-face <<'EOF'
-#%PAM-1.0
-# LinuxSup face authentication for KDE/SDDM login
-# Copy this file to /etc/pam.d/sddm to enable
-
-# Face authentication first
-auth    sufficient    pam_exec.so    quiet    stdout    /usr/local/bin/linuxsup-pam-wrapper
-
-# Standard SDDM authentication
-auth    include       common-auth
-account include       common-account
-password include      common-password
-session include       common-session
-EOF
-
-# Console login configuration
-cat > examples/pam.d/login-with-face <<'EOF'
-#%PAM-1.0
-# LinuxSup face authentication for console login
-# Copy this file to /etc/pam.d/login to enable
-# WARNING: Console may not have camera access!
-
-# Face authentication (if camera available)
-auth    sufficient    pam_exec.so    quiet    stdout    /usr/local/bin/linuxsup-pam-wrapper
-
-# Standard login authentication
-auth    requisite     pam_nologin.so
-auth    include       common-auth
-account include       common-account
-session include       common-session
-password include      common-password
-EOF
+# Note: PAM configurations are already in examples/pam.d/
+echo "PAM configuration examples available in examples/pam.d/"
 
 echo
 echo "Installation complete!"
 echo
 echo "Next steps:"
-echo "1. Start the embedding service: sudo systemctl start linuxsup-embedding"
-echo "2. Add current user to video group: sudo usermod -a -G video $USER"
-echo "3. Log out and back in for group change to take effect"
-echo "4. Enroll yourself: sudo linuxsup --system enroll -u $USER"
-echo "5. Test authentication: sudo linuxsup --system test -u $USER"
 echo
-echo "To enable face authentication:"
-if [ -f "/lib/security/pam_linuxsup.so" ]; then
-    echo "- For sudo (RECOMMENDED): sudo cp examples/pam.d/sudo-with-face-native /etc/pam.d/sudo"
-    echo "- For sudo (fallback): sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo"
-else
-    echo "- For sudo: sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo"
-fi
-echo "- For GNOME login: sudo cp examples/pam.d/gdm-password-with-face /etc/pam.d/gdm-password"
-echo "- For KDE login: sudo cp examples/pam.d/sddm-with-face /etc/pam.d/sddm"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 1: Start the Service"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "1. Start the embedding service:"
+echo "   sudo systemctl start linuxsup-embedding"
+echo "   sudo systemctl enable linuxsup-embedding  # (optional: auto-start)"
 echo
-echo "⚠️  IMPORTANT: Keep a root terminal open when modifying PAM!"
-echo "⚠️  Test in a new terminal before closing the root terminal!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 2: Enroll and Test (No logout required!)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "2. Enroll yourself (service handles everything):"
+echo "   linuxsup enroll --username $USER"
+echo
+echo "3. Test authentication:"
+echo "   linuxsup test --username $USER"
+echo
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 3: Enable PAM Integration (OPTIONAL - BE CAREFUL)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "⚠️  BEFORE modifying PAM, open a root shell as backup:"
+echo "   sudo -i  # Keep this terminal open!"
+echo
+echo "Then in ANOTHER terminal, enable face auth:"
+echo "- For sudo: sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo"
+echo "- For GNOME: sudo cp examples/pam.d/gdm-with-face /etc/pam.d/gdm-password"
+echo "- For KDE: sudo cp examples/pam.d/sddm-with-face /etc/pam.d/sddm"
+echo
+echo "Test sudo in a NEW terminal before closing the root shell."
+echo "All configs include password fallback for safety."
 echo
 echo "To enable automatic startup:"
 echo "  sudo systemctl enable linuxsup-embedding"

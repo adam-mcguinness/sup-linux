@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment="LD_LIBRARY_PATH=/usr/local/lib/linuxsup"
 ExecStart=/usr/local/bin/linuxsup-embedding-service
 Restart=always
 RestartSec=5
@@ -15,13 +16,13 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 NoNewPrivileges=yes
-ReadWritePaths=/run/linuxsup
+ReadWritePaths=/run/linuxsup /var/lib/linuxsup
 RuntimeDirectory=linuxsup
 RuntimeDirectoryMode=0755
 
 # Resource limits
-MemoryLimit=512M
-CPUQuota=50%
+MemoryMax=512M
+# CPUQuota=50%  # Disabled - limiting CPU makes face detection too slow
 
 # Logging
 StandardOutput=journal

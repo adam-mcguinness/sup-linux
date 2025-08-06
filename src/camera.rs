@@ -10,7 +10,6 @@ use std::fs;
 pub struct Camera {
     device: Device,
     config: Config,
-    stream: Option<v4l::io::mmap::Stream<'static>>,
 }
 
 // Helper to work around lifetime issues
@@ -185,7 +184,7 @@ impl Camera {
                      config.camera.width, config.camera.height);
         }
 
-        Ok(Self { device, config, stream: None })
+        Ok(Self { device, config })
     }
 
     pub fn capture_frame(&mut self) -> Result<DynamicImage> {
@@ -247,6 +246,7 @@ impl Camera {
     }
 }
 
+#[allow(dead_code)]
 impl<'a> CameraSession<'a> {
     pub fn capture_frame(&mut self) -> Result<DynamicImage> {
         let (buf, _meta) = self.stream.next()

@@ -110,28 +110,54 @@ impl QualityMetrics {
     }
 }
 
-/// Calculate embedding consistency across multiple captures
+/// Calculate embedding diversity score for robustness
+/// For real-world applications, we want controlled variation (not too similar, not too different)
 pub fn calculate_embedding_consistency(embeddings: &[Embedding]) -> f32 {
     if embeddings.len() < 2 {
-        return 1.0; // Perfect consistency with single embedding
+        return 0.8; // Default score for single embedding
     }
     
-    let mut total_similarity = 0.0;
-    let mut count = 0;
+    let mut similarities = Vec::new();
     
     // Calculate pairwise similarities
     for i in 0..embeddings.len() {
         for j in i+1..embeddings.len() {
-            total_similarity += cosine_similarity(&embeddings[i], &embeddings[j]);
-            count += 1;
+            similarities.push(cosine_similarity(&embeddings[i], &embeddings[j]));
         }
     }
     
-    if count > 0 {
-        total_similarity / count as f32
-    } else {
-        1.0
+    if similarities.is_empty() {
+        return 0.8;
     }
+    
+    // Calculate average similarity
+    let avg_similarity = similarities.iter().sum::<f32>() / similarities.len() as f32;
+    
+    // Calculate variance to measure diversity
+    let variance = similarities.iter()
+        .map(|s| (s - avg_similarity).powi(2))
+        .sum::<f32>() / similarities.len() as f32;
+    
+    // Ideal range: 0.75-0.90 similarity (some variation but still the same person)
+    // Penalize both too high similarity (no variation) and too low (too different)
+    let ideal_similarity = 0.82;
+    let ideal_variance = 0.005; // Small but present variation
+    
+    // Score based on how close we are to ideal values
+    let similarity_score = 1.0 - (avg_similarity - ideal_similarity).abs() * 2.0;
+    let variance_score = if variance < 0.001 {
+        0.7 // Too similar, no variation
+    } else if variance > 0.02 {
+        0.7 // Too different
+    } else {
+        1.0 - (variance - ideal_variance).abs() * 10.0
+    };
+    
+    // Combine scores (weighted average)
+    let combined_score = (similarity_score * 0.7 + variance_score * 0.3).max(0.0).min(1.0);
+    
+    // Return the score (higher is better for robust enrollment)
+    combined_score
 }
 
 // Helper function to calculate brightness and contrast scores

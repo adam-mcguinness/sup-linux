@@ -21,6 +21,7 @@ pub struct FaceDetector {
 }
 
 impl FaceDetector {
+    #[allow(dead_code)]
     pub fn new_with_model_path(config: &Config, models_base: &std::path::Path) -> Result<Self> {
         let mut model_path = config.models.detector_path.clone();
         if model_path.is_relative() {

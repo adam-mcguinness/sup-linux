@@ -116,8 +116,15 @@ fn default_true_option() -> Option<bool> { Some(true) }
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let config_path = "configs/face-auth.toml";
-        Self::load_from_path(&std::path::PathBuf::from(config_path))
+        // Try system config first for production deployment
+        let system_config = std::path::PathBuf::from("/etc/linuxsup/face-auth.toml");
+        if system_config.exists() {
+            Self::load_from_path(&system_config)
+        } else {
+            // Fall back to local config for development
+            let local_config = std::path::PathBuf::from("configs/face-auth.toml");
+            Self::load_from_path(&local_config)
+        }
     }
     
     pub fn load_from_path(path: &std::path::Path) -> Result<Self> {

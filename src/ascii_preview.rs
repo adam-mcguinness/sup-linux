@@ -5,7 +5,6 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     terminal::{self, ClearType},
     cursor,
-    execute,
 };
 
 const ASCII_RAMP: &str = " .·:;+=xX#@";
@@ -131,11 +130,6 @@ impl AsciiRenderer {
         }
     }
 
-    fn overlay_center_text(&self, grid: &mut Vec<Vec<char>>, text: &str) {
-        let center_y = self.height / 2;
-        let center_x = self.width / 2;
-        self.overlay_text(grid, text, center_x, center_y);
-    }
 
     fn draw_face_box(&self, grid: &mut Vec<Vec<char>>, face: &FaceBox, img_width: f32, img_height: f32) {
         // Scale face coordinates to terminal
@@ -214,7 +208,3 @@ pub fn check_for_escape() -> io::Result<bool> {
     Ok(false)
 }
 
-pub fn show_capture_flash() {
-    println!("\n    📸 CAPTURED!");
-    std::thread::sleep(std::time::Duration::from_millis(200));
-}

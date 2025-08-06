@@ -8,8 +8,8 @@ name = "pam_linuxsup"
 crate-type = ["cdylib"]
 
 [dependencies]
-pamsm = "0.5"
-linuxSup = { path = ".." }
+pamsm = { version = "0.5", features = ["libpam"] }
+linux_sup = { path = ".." }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"

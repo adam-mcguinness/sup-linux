@@ -22,7 +22,6 @@ A secure face authentication system for Linux, inspired by Windows Hello. Uses i
 - ✅ High-quality enrollment with multiple captures
 - ✅ INT8 model quantization for ~16+ FPS performance
 - ✅ Development mode for safe testing
-- ✅ Backward compatibility with pam_exec
 
 ### Planned (Phase 2)
 - 🔒 AES-256-GCM encryption for embeddings
@@ -58,10 +57,15 @@ ls models/
 # If missing, contact repository maintainer for model access
 ```
 
-3. **Build workspace:**
+3. **Build the project:**
 ```bash
-# Build all components (main CLI, PAM module, embedding service)
-cargo build --release --all
+# Build all components as normal user (NOT with sudo)
+./build.sh
+
+# This builds:
+# - linuxsup (main CLI)
+# - linuxsup-embedding-service (systemd service)
+# - libpam_linuxsup.so (PAM module)
 ```
 
 4. **Test camera and detection:**
@@ -236,24 +240,24 @@ cargo run --bin linuxsup -- --dev test-detection
 ### Quick Install (System-wide)
 
 ```bash
-# Build and install
+# Step 1: Build the project (as normal user)
+./build.sh
+
+# Step 2: Install system-wide (requires root)
 sudo ./install.sh
 
-# Start the embedding service
+# Step 3: Start the embedding service
 sudo systemctl start linuxsup-embedding
 sudo systemctl enable linuxsup-embedding  # For automatic startup
 
-# Enroll yourself
-linuxsup --system enroll --username $USER
+# Step 4: Enroll yourself
+linuxsup enroll --username $USER
 
-# Test authentication
-linuxsup --system test --username $USER
+# Step 5: Test authentication
+linuxsup test --username $USER
 
-# Enable for sudo (choose one):
-# Option 1: Native PAM module (RECOMMENDED - more secure)
-sudo cp examples/pam.d/sudo-with-face-native /etc/pam.d/sudo
-
-# Option 2: pam_exec fallback (for testing)
+# Step 6: Enable for sudo (optional):
+# ⚠️ ALWAYS keep a root shell open when modifying PAM!
 sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo
 ```
 
@@ -302,7 +306,6 @@ Current phase: **Phase 3 - Secure PAM Integration**
 - ✅ Native PAM module with challenge-response protocol
 - ✅ Privilege separation between authentication and face capture
 - ✅ Systemd service for embedding generation
-- 🔄 Backward compatible with pam_exec during transition
 - ⏳ Phase 2 encryption features pending
 
 ## License

@@ -5,7 +5,7 @@ mod config;
 mod detector;
 mod dev_mode;
 mod error;
-mod paths;
+mod protocol;
 mod quality;
 mod recognizer;
 mod storage;
@@ -19,13 +19,9 @@ use anyhow::Result;
 #[command(name = "linuxSup")]
 #[command(about = "Linux face authentication system")]
 struct Cli {
-    /// Enable development mode (saves data locally)
+    /// Enable development mode (saves data locally for testing)
     #[arg(long, global = true)]
     dev: bool,
-    
-    /// Use system paths (requires root for some operations)
-    #[arg(long, global = true)]
-    system: bool,
     
     #[command(subcommand)]
     command: Commands,
@@ -74,12 +70,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     // Setup logging based on mode
-    setup_logging(cli.dev || cli.system);
+    setup_logging(cli.dev);
     
-    // Create paths context
-    let paths = paths::Paths::new(cli.dev, cli.system)?;
-    
-    // Create dev mode context (for backward compatibility)
+    // Create dev mode context
     let dev_mode = dev_mode::DevMode::new(cli.dev)?;
 
     match cli.command {

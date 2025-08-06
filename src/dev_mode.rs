@@ -62,6 +62,7 @@ impl DevMode {
         }
     }
     
+    #[allow(dead_code)]
     pub fn logs_dir(&self) -> PathBuf {
         if self.enabled {
             self.base_dir.join("logs")
@@ -70,6 +71,7 @@ impl DevMode {
         }
     }
     
+    #[allow(dead_code)]
     pub fn config_dir(&self) -> PathBuf {
         if self.enabled {
             self.base_dir.join("config")

@@ -25,6 +25,7 @@ pub struct UserStore {
 }
 
 impl UserStore {
+    #[allow(dead_code)]
     pub fn new_with_paths(data_dir: PathBuf, enrollment_images_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&data_dir)?;
         fs::create_dir_all(&enrollment_images_dir)?;
@@ -35,6 +36,7 @@ impl UserStore {
         })
     }
     
+    #[allow(dead_code)]
     pub fn new() -> Result<Self> {
         let dirs = ProjectDirs::from("com", "faceauth", "FaceAuth")
             .ok_or_else(|| FaceAuthError::Storage("Failed to get project dirs".into()))?;
