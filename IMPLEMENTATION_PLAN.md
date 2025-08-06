@@ -81,50 +81,63 @@ This document outlines the phased approach to implementing a secure face authent
 
 ### 2.3 Access Control
 - [ ] User permission verification
-- [ ] Rate limiting for attempts
+- [ ] Rate limiting for attempts (partially addressed in Phase 3.3)
 - [ ] Temporary lockout mechanism
-- [ ] Audit logging
+- [ ] Audit logging (foundation laid with systemd journal)
 
 ## Phase 3: PAM Integration ← IN PROGRESS
 
-### 3.1 PAM Module Development
-- [ ] Create `pam_linuxsup` module in Rust using `pamsm` crate
-  - [ ] Implement challenge-response authentication
-  - [ ] Generate random challenges in PAM module
-  - [ ] Verify embedding signatures
-  - [ ] Perform similarity comparison in PAM module
+### 3.1 PAM Module Development ✅ MOSTLY COMPLETE
+- [x] Create `pam_linuxsup` module in Rust using `pamsm` crate
+  - [x] Implement challenge-response authentication
+  - [x] Generate random challenges in PAM module
+  - [x] Verify embedding signatures (SHA256 - upgrade to HMAC pending)
+  - [x] Perform similarity comparison in PAM module
 - [ ] Implement PAM conversation functions for user feedback
-- [ ] Unix socket communication with embedding service
-- [ ] Proper PAM return codes (SUCCESS, AUTH_ERR, SERVICE_ERR)
+- [x] Unix socket communication with embedding service
+- [x] Proper PAM return codes (SUCCESS, AUTH_ERR, SERVICE_ERR)
 
-### 3.2 Service Architecture (Secure Design)
-- [ ] Create embedding service (unprivileged)
-  - [ ] Camera access and face detection only
-  - [ ] Return embeddings with challenge signature
-  - [ ] No authentication decisions
-  - [ ] No access to stored user data
-- [ ] Unix socket at `/run/linuxsup/embedding.sock`
-- [ ] Service runs as dedicated `linuxsup` user
-- [ ] Strict socket permissions (0600)
-- [ ] systemd service unit with security restrictions
+### 3.2 Service Architecture (Secure Design) ✅ COMPLETED
+- [x] Create embedding service (unprivileged)
+  - [x] Camera access and face detection only
+  - [x] Return embeddings with challenge signature
+  - [x] No authentication decisions
+  - [x] No access to stored user data
+- [x] Unix socket at `/run/linuxsup/embedding.sock`
+- [x] Service runs as dedicated `linuxsup` user
+- [x] Strict socket permissions (0600)
+- [x] systemd service unit with security restrictions
 
-### 3.3 Security Protocol
-- [ ] Challenge-Response Implementation:
+### 3.3 Security Protocol ✅ MOSTLY COMPLETE
+- [x] Challenge-Response Implementation:
   ```
   PAM → Generate Challenge → Service
   Service → Capture Face → Generate Embedding → Sign(Embedding + Challenge)
   PAM ← Embedding + Signature ← Service
   PAM → Verify Signature → Compare Embeddings → Auth Decision
   ```
-- [ ] Embedding storage access only in PAM module
-- [ ] Time-bound challenges (5 second validity)
-- [ ] Rate limiting in PAM module
+- [x] Embedding storage access only in PAM module
+- [x] Time-bound challenges (5 second validity)
+- [ ] Rate limiting in PAM module (pending)
 
-### 3.4 Configuration Integration
-- [ ] Replace pam_exec with native module
-- [ ] Update PAM configuration examples
-- [ ] Integration with common PAM stacks
-- [ ] Fallback authentication flows
+### 3.4 Configuration Integration ✅ MOSTLY COMPLETE
+- [x] Native module available (can replace pam_exec)
+- [x] Update PAM configuration examples (both native and pam_exec)
+- [ ] Full integration testing with common PAM stacks
+- [x] Fallback authentication flows (maintains pam_exec compatibility)
+
+### 3.5 Implementation Notes
+- **Architecture Decision**: Separate crate (`pam_module/`) for PAM module due to `pamsm` macro requirements
+- **Security Status**:
+  - ✅ Privilege separation achieved through Unix socket IPC
+  - ✅ Service has no access to user data or auth decisions
+  - ⚠️ Currently using SHA256 for signatures (should upgrade to HMAC with shared secret)
+  - ⚠️ Rate limiting not yet implemented (from Phase 2.3)
+- **Dual-Mode Operation**: System supports both pam_exec (legacy) and native module for smooth transition
+- **Files Created**:
+  - `pam_module/` - Separate Rust crate for PAM module
+  - `src/bin/embedding_service.rs` - Unprivileged embedding service
+  - `systemd/linuxsup-embedding.service` - systemd service configuration
 
 ## Phase 4: System Integration
 
@@ -303,12 +316,15 @@ cargo run -- --dev test --username testuser
 
 ## Development Notes for Next Session
 
-### Current Status (Phase 1.9 MVP Complete)
+### Current Status (Phase 3 - PAM Integration In Progress)
 - ✅ All Phase 1 features implemented and tested
 - ✅ K-of-N authentication working successfully (tested by user)
-- ✅ PAM integration complete with install/uninstall scripts
+- ✅ Basic PAM integration complete (pam_exec MVP)
+- ✅ Native PAM module implemented with challenge-response
+- ✅ Privilege separation architecture completed
 - ✅ System can handle both root and non-root user enrollment
 - ✅ Performance optimized: ~50ms per detection, 16+ FPS
+- 🔄 Dual-mode operation: pam_exec (stable) + native module (testing)
 
 ### Key Implementation Details
 1. **Authentication Flow**: 
@@ -345,17 +361,27 @@ cargo run -- --dev test --username testuser
 - ✅ Channel mismatch (YOLOv8 needs 3ch, ArcFace needs 1ch)
 - ✅ Performance bottlenecks resolved
 
-### Next Steps (Phase 3: Secure PAM Integration)
-- Replace pam_exec wrapper with native Rust PAM module
-- Implement challenge-response protocol for security
-- Separate embedding service from authentication logic
-- Move all security decisions to PAM module
-- Maintain backward compatibility during transition
+### Next Steps (Complete Phase 3 & Begin Phase 2)
+Phase 3 Remaining:
+- [ ] Implement rate limiting in PAM module
+- [ ] Add PAM conversation functions for user feedback
+- [ ] Full integration testing with GDM/SDDM/LightDM
+- [ ] Upgrade from SHA256 to HMAC for signatures
+
+Phase 2 Security (Priority Items):
+- [ ] Implement AES-256-GCM encryption for stored embeddings
+- [ ] Add secure key storage (kernel keyring or TPM)
+- [ ] Complete audit logging implementation
+- [ ] Add lockout mechanism after failed attempts
 
 ### Testing Commands
 ```bash
 # Install system-wide (requires root)
 sudo ./install.sh
+
+# Start embedding service (for native PAM module)
+sudo systemctl start linuxsup-embedding
+sudo systemctl enable linuxsup-embedding
 
 # Test enrollment (as regular user)
 linuxsup enroll --username $USER
@@ -363,9 +389,18 @@ linuxsup enroll --username $USER
 # Test authentication
 linuxsup test --username $USER
 
-# Test with sudo (after PAM setup)
+# Test with sudo - Option 1: Native PAM module (recommended)
+sudo cp examples/pam.d/sudo-with-face-native /etc/pam.d/sudo
 sudo -k  # Clear sudo cache
 sudo ls  # Should trigger face auth
+
+# Test with sudo - Option 2: pam_exec fallback
+sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo
+sudo -k  # Clear sudo cache
+sudo ls  # Should trigger face auth
+
+# Check service logs
+sudo journalctl -u linuxsup-embedding -f
 
 # Uninstall
 sudo ./uninstall.sh
