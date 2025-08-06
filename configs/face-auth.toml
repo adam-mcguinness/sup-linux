@@ -1,0 +1,63 @@
+# Face Authentication Configuration
+
+[camera]
+# Camera device index (0 for default camera, 51 for Logitech BRIO IR camera, 999 for auto-detect)
+device_index = 51
+# Camera resolution
+width = 640
+height = 480
+# Number of frames to warm up the camera (useful for IR emitters)
+warmup_frames = 3
+# Delay between warmup frames in milliseconds
+warmup_delay_ms = 100
+
+[models]
+# Path to face detection model
+detector_path = "models/detect.onnx"
+# Path to face recognition model
+recognizer_path = "models/compare.onnx"
+
+[auth]
+# Similarity threshold for face matching (0.0-1.0, higher = stricter)
+similarity_threshold = 0.6
+# Authentication timeout in seconds
+timeout_seconds = 5
+# Minimum confidence for face detection (0.0-1.0)
+detection_confidence = 0.6
+# K-of-N matching
+k_required_matches = 2      # Require 2 successful matches
+n_total_attempts = 3        # Out of 3 total attempts
+# Rolling buffer for embedding fusion
+embedding_buffer_size = 3   # Keep last 3 embeddings for averaging
+use_embedding_fusion = true # Enable dynamic embedding fusion
+# Timeout when face not detected
+lost_face_timeout = 3
+
+[detector]
+# Input dimensions for the detector model (YOLOv8)
+input_width = 640
+input_height = 640
+# Normalization parameters for YOLOv8 preprocessing
+normalization_mean = 0.0
+normalization_std = 255.0
+
+[recognizer]
+# Input size for the recognizer model (square dimensions)
+input_size = 112
+# Normalization value for recognizer preprocessing
+normalization_value = 127.5
+
+[storage]
+# Directory for storing enrollment images (relative to user data directory)
+enrollment_images_dir = "enrollment_images"
+
+[performance]
+# Model optimization
+enable_quantization = true  # Use INT8 quantization if available
+optimization_level = 3      # ONNX optimization level (0-3)
+
+[enrollment]
+# Enhanced enrollment
+store_averaged_embedding = true
+capture_quality_metrics = true
+min_enrollment_quality = 0.7
