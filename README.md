@@ -207,13 +207,21 @@ https://vcipl-okstate.org/pbvs/bench/Data/07/download.html
 # Build and install
 sudo ./install.sh
 
+# Start the embedding service
+sudo systemctl start linuxsup-embedding
+sudo systemctl enable linuxsup-embedding  # For automatic startup
+
 # Enroll yourself
 linuxsup enroll --username $USER
 
 # Test authentication
 linuxsup test --username $USER
 
-# Enable for sudo (optional)
+# Enable for sudo (choose one):
+# Option 1: Native PAM module (RECOMMENDED - more secure)
+sudo cp examples/pam.d/sudo-with-face-native /etc/pam.d/sudo
+
+# Option 2: pam_exec fallback (for testing)
 sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo
 ```
 
@@ -234,11 +242,36 @@ device_index = 51            # 999 for auto-detect
 warmup_frames = 3           # IR camera warmup
 ```
 
+## Architecture
+
+LinuxSup now uses a secure architecture with privilege separation:
+
+```
+┌─────────────┐     ┌────────────────┐     ┌──────────────────┐
+│ PAM Module  │────▶│  Unix Socket   │────▶│ Embedding Service│
+│(pam_linuxsup)     │ /run/linuxsup/ │     │ (unprivileged)  │
+└─────────────┘     └────────────────┘     └──────────────────┘
+        │                                            │
+        ▼                                            ▼
+┌─────────────┐                              ┌──────────────┐
+│ User Data   │                              │ Camera/Models│
+│ (privileged)│                              │ (read-only)  │
+└─────────────┘                              └──────────────┘
+```
+
+- **PAM Module**: Handles authentication decisions and user data access
+- **Embedding Service**: Only captures faces and generates embeddings
+- **Challenge-Response**: Prevents replay attacks and service spoofing
+
 ## Implementation Status
 
-Current phase: **Phase 1.9 MVP Complete**
+Current phase: **Phase 3 - Secure PAM Integration**
 
-The system is functional for testing but NOT SECURE for production use. Phase 2 will add encryption and security hardening.
+- ✅ Native PAM module with challenge-response protocol
+- ✅ Privilege separation between authentication and face capture
+- ✅ Systemd service for embedding generation
+- 🔄 Backward compatible with pam_exec during transition
+- ⏳ Phase 2 encryption features pending
 
 ## License
 
