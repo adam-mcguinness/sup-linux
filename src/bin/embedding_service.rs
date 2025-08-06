@@ -4,9 +4,10 @@ use linux_sup::{
     detector::FaceDetector,
     recognizer::{FaceRecognizer, cosine_similarity},
     error::Result,
-    protocol::{Request, Response, AuthRequest, AuthResponse, EnrollRequest, EnrollResponse, SOCKET_PATH},
+    protocol::{Request, Response, AuthRequest, AuthResponse, EnrollRequest, EnrollResponse},
     storage::UserStore,
 };
+use clap::Parser;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::io::{Read, Write};
 use std::time::{Duration, SystemTime, Instant};
@@ -16,7 +17,22 @@ use std::collections::VecDeque;
 use sha2::{Sha256, Digest};
 use anyhow::Context as _;
 
-// Moved SOCKET_PATH to protocol module
+#[derive(Parser, Debug)]
+#[command(name = "linuxsup-embedding-service")]
+#[command(about = "LinuxSup face embedding service")]
+struct Args {
+    /// Run in development mode
+    #[arg(long)]
+    dev: bool,
+    
+    /// Socket path in dev mode
+    #[arg(long, default_value = "/tmp/linuxsup.sock")]
+    dev_socket: String,
+    
+    /// Data directory in dev mode
+    #[arg(long, default_value = "./dev_data")]
+    dev_data_dir: String,
+}
 
 #[derive(Debug)]
 struct PeerCredentials {
@@ -114,38 +130,60 @@ fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials> {
 }
 
 fn main() -> Result<()> {
+    // Parse command-line arguments
+    let args = Args::parse();
+    
     // Set up logging
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
     
-    tracing::info!("Starting LinuxSup embedding service");
+    tracing::info!("Starting LinuxSup embedding service (dev_mode: {})", args.dev);
+    
+    // Determine paths based on mode
+    let (socket_path, data_dir, config_path) = if args.dev {
+        (
+            args.dev_socket.as_str(),
+            PathBuf::from(args.dev_data_dir),
+            PathBuf::from("configs/face-auth.toml"),
+        )
+    } else {
+        (
+            "/run/linuxsup/embedding.sock",
+            PathBuf::from("/var/lib/linuxsup"),
+            PathBuf::from("/etc/linuxsup/face-auth.toml"),
+        )
+    };
     
     // Clean up old socket if exists
-    if Path::new(SOCKET_PATH).exists() {
-        fs::remove_file(SOCKET_PATH)?;
+    if Path::new(socket_path).exists() {
+        fs::remove_file(socket_path)?;
     }
     
     // Create socket directory
-    if let Some(parent) = Path::new(SOCKET_PATH).parent() {
+    if let Some(parent) = Path::new(socket_path).parent() {
         fs::create_dir_all(parent)?;
     }
     
     // Create Unix socket
-    let listener = UnixListener::bind(SOCKET_PATH)
+    let listener = UnixListener::bind(socket_path)
         .context("Failed to bind Unix socket")?;
     
     // Set socket permissions (allow all users to connect)
     // Authorization is handled per-request in handle_enroll_request
     std::process::Command::new("chmod")
-        .args(&["666", SOCKET_PATH])
+        .args(&["666", socket_path])
         .status()?;
     
-    tracing::info!("Listening on {}", SOCKET_PATH);
+    tracing::info!("Listening on {}", socket_path);
     
-    // Initialize components
-    let config = Config::load()?;
-    let mut camera = Camera::new(&config)?;
+    // Initialize components (but NOT camera - we'll create it per request)
+    let config = if config_path.exists() {
+        Config::load_from_path(&config_path)?
+    } else {
+        Config::load()?
+    };
+    // Only initialize models once - they can be reused
     let detector = FaceDetector::new(&config)?;
     let recognizer = FaceRecognizer::new(&config)?;
     
@@ -153,7 +191,7 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(e) = handle_client(stream, &mut camera, &detector, &recognizer, &config) {
+                if let Err(e) = handle_client(stream, &detector, &recognizer, &config, &data_dir) {
                     tracing::error!("Client error: {}", e);
                 }
             }
@@ -168,10 +206,10 @@ fn main() -> Result<()> {
 
 fn handle_client(
     mut stream: UnixStream,
-    camera: &mut Camera,
     detector: &FaceDetector,
     recognizer: &FaceRecognizer,
     config: &Config,
+    data_dir: &Path,
 ) -> Result<()> {
     // Get peer credentials to identify who's connecting
     let peer_cred = get_peer_credentials(&stream)?;
@@ -203,11 +241,11 @@ fn handle_client(
     let response = match request {
         Request::Authenticate(auth_req) => {
             tracing::info!("Processing auth request for user: {}", auth_req.username);
-            handle_auth_request(camera, detector, recognizer, auth_req, config)
+            handle_auth_request(detector, recognizer, auth_req, config, data_dir)
         }
         Request::Enroll(enroll_req) => {
             tracing::info!("Processing enrollment request for user: {}", enroll_req.username);
-            handle_enroll_request(camera, detector, recognizer, enroll_req, &peer_cred, config)
+            handle_enroll_request(detector, recognizer, enroll_req, &peer_cred, config, data_dir)
         }
     };
     
@@ -225,13 +263,26 @@ fn handle_client(
 }
 
 fn handle_auth_request(
-    camera: &mut Camera,
     detector: &FaceDetector,
     recognizer: &FaceRecognizer,
     request: AuthRequest,
     config: &Config,
+    data_dir: &Path,
 ) -> Response {
-    match perform_authentication(camera, detector, recognizer, &request.username, &request.challenge, config) {
+    // Create camera just for this authentication
+    let mut camera = match Camera::new(config) {
+        Ok(c) => c,
+        Err(e) => {
+            return Response::Error(format!("Failed to initialize camera: {}", e));
+        }
+    };
+    
+    let result = perform_authentication(&mut camera, detector, recognizer, &request.username, &request.challenge, config, data_dir);
+    
+    // Camera will be dropped here, releasing the device
+    drop(camera);
+    
+    match result {
         Ok(auth_response) => Response::Auth(auth_response),
         Err(e) => {
             tracing::error!("Auth failed: {}", e);
@@ -241,12 +292,12 @@ fn handle_auth_request(
 }
 
 fn handle_enroll_request(
-    camera: &mut Camera,
     detector: &FaceDetector,
     recognizer: &FaceRecognizer,
     request: EnrollRequest,
     peer_cred: &PeerCredentials,
     config: &Config,
+    data_dir: &Path,
 ) -> Response {
     use linux_sup::quality::QualityMetrics;
     
@@ -275,10 +326,10 @@ fn handle_enroll_request(
     tracing::info!("Starting enrollment for user: {} (requested by UID: {})", 
         request.username, peer_cred.uid);
     
-    // Create user store with system paths
+    // Create user store with appropriate paths
     let store = match UserStore::new_with_paths(
-        PathBuf::from("/var/lib/linuxsup/users"),
-        PathBuf::from("/var/lib/linuxsup/enrollment"),
+        data_dir.join("users"),
+        data_dir.join("enrollment"),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -304,6 +355,17 @@ fn handle_enroll_request(
             return Response::Enroll(EnrollResponse {
                 success: false,
                 message: format!("Failed to get enrollment directory: {}", e),
+            });
+        }
+    };
+    
+    // Create camera just for this enrollment
+    let mut camera = match Camera::new(config) {
+        Ok(c) => c,
+        Err(e) => {
+            return Response::Enroll(EnrollResponse {
+                success: false,
+                message: format!("Failed to initialize camera: {}", e),
             });
         }
     };
@@ -455,11 +517,12 @@ fn perform_authentication(
     username: &str,
     challenge: &[u8],
     config: &Config,
+    data_dir: &Path,
 ) -> Result<AuthResponse> {
     // Load user's stored embeddings
     let store = UserStore::new_with_paths(
-        PathBuf::from("/var/lib/linuxsup/users"),
-        PathBuf::from("/var/lib/linuxsup/enrollment"),
+        data_dir.join("users"),
+        data_dir.join("enrollment"),
     )?;
     
     let user_data = match store.get_user(username) {

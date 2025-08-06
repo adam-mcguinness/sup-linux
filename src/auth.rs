@@ -663,98 +663,21 @@ pub fn test_detection_dev(dev_mode: &DevMode) -> Result<()> {
 }
 
 pub fn enroll_user_dev(username: &str, dev_mode: &DevMode) -> Result<()> {
-    // If in dev mode, do local enrollment
-    if dev_mode.is_enabled() {
-        let mut auth = FaceAuth::new_with_dev_mode(dev_mode.clone())?;
-        let config = Config::load()?;
-        
-        // Use ASCII preview enrollment if enabled
-        if config.enrollment.enable_ascii_preview.unwrap_or(true) {
-            auth.enroll_with_preview(username)
-        } else {
-            auth.enroll(username)
-        }
-    } else {
-        // In production mode, use the service
-        enroll_via_service(username)
-    }
+    use crate::service_client::ServiceClient;
+    
+    // Always use the service now (unified path)
+    let mut client = ServiceClient::new(dev_mode.is_enabled());
+    client.enroll(username)
 }
 
-// Enrollment via the embedding service (for production)
-fn enroll_via_service(username: &str) -> Result<()> {
-    use std::os::unix::net::UnixStream;
-    use std::io::{Read, Write};
-    use crate::protocol::{Request, Response, EnrollRequest, SOCKET_PATH};
-    
-    println!("Connecting to embedding service...");
-    
-    // Connect to service
-    let mut stream = UnixStream::connect(SOCKET_PATH)
-        .map_err(|e| FaceAuthError::Other(anyhow::anyhow!(
-            "Failed to connect to embedding service: {}. Is the service running?", e
-        )))?;
-    
-    // Set timeout (longer for enrollment)
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    
-    // Create enrollment request
-    let request = Request::Enroll(EnrollRequest {
-        username: username.to_string(),
-    });
-    
-    // Serialize request
-    let request_data = bincode::serialize(&request)
-        .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
-    let request_len = (request_data.len() as u32).to_le_bytes();
-    
-    // Send request
-    stream.write_all(&request_len)?;
-    stream.write_all(&request_data)?;
-    stream.flush()?;
-    
-    println!("📸 Starting enrollment - please look at the camera");
-    println!("The service will capture 5 images (this takes about 60 seconds)");
-    println!("Please:");
-    println!("  • Keep your face in view of the camera");
-    println!("  • Move your head slightly between captures");
-    println!("  • Maintain good lighting");
-    println!("\nProcessing...");
-    
-    // Read response length
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let response_len = u32::from_le_bytes(len_buf) as usize;
-    
-    // Read response
-    let mut response_buf = vec![0u8; response_len];
-    stream.read_exact(&mut response_buf)?;
-    
-    // Deserialize response
-    let response: Response = bincode::deserialize(&response_buf)
-        .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to deserialize response: {}", e)))?;
-    
-    match response {
-        Response::Enroll(enroll_resp) => {
-            if enroll_resp.success {
-                println!("✅ {}", enroll_resp.message);
-                Ok(())
-            } else {
-                Err(FaceAuthError::Other(anyhow::anyhow!(enroll_resp.message)))
-            }
-        }
-        Response::Error(msg) => {
-            Err(FaceAuthError::Other(anyhow::anyhow!("Service error: {}", msg)))
-        }
-        _ => {
-            Err(FaceAuthError::Other(anyhow::anyhow!("Unexpected response type")))
-        }
-    }
-}
+// Removed enroll_via_service - now using ServiceClient for both dev and production
 
 pub fn authenticate_user_dev(username: &str, dev_mode: &DevMode) -> Result<bool> {
-    let mut auth = FaceAuth::new_with_dev_mode(dev_mode.clone())?;
-    auth.authenticate(username)
+    use crate::service_client::ServiceClient;
+    
+    // Always use the service now (unified path)
+    let mut client = ServiceClient::new(dev_mode.is_enabled());
+    client.test_auth(username)
 }
 
 // Helper function to average embeddings

@@ -8,6 +8,7 @@ mod error;
 mod protocol;
 mod quality;
 mod recognizer;
+mod service_client;
 mod storage;
 mod visualization;
 

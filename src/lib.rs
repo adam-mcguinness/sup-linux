@@ -9,6 +9,7 @@ pub mod paths;
 pub mod protocol;
 pub mod quality;
 pub mod recognizer;
+pub mod service_client;
 pub mod storage;
 pub mod visualization;
 
