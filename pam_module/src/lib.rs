@@ -2,7 +2,7 @@
 extern crate pamsm;
 
 use pamsm::{PamServiceModule, Pam, PamFlags, PamError};
-use linux_sup::protocol::{Request, Response, AuthRequest, SOCKET_PATH};
+use sup_linux::protocol::{Request, Response, AuthRequest, SOCKET_PATH};
 use rand::{Rng, thread_rng};
 use std::time::{SystemTime, Duration};
 use anyhow::Result;
@@ -11,13 +11,26 @@ use std::io::{Read, Write};
 
 const CHALLENGE_SIZE: usize = 32;
 
-// Protocol types imported from linux_sup::protocol
+// Protocol types imported from sup_linux::protocol
 
-pub struct LinuxSupPam;
+pub struct SupLinuxPam;
 
-impl PamServiceModule for LinuxSupPam {
-    fn authenticate(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
-        eprintln!("LinuxSup: PAM module authenticate() called");
+impl PamServiceModule for SupLinuxPam {
+    fn authenticate(pamh: Pam, _flags: PamFlags, args: Vec<String>) -> PamError {
+        eprintln!("SupLinux: PAM module authenticate() called");
+        
+        // Parse timeout from args (format: "timeout=10")
+        // This is how long the PAM module waits for the service to respond
+        // Should be longer than the service's authentication timeout to allow completion
+        let pam_timeout_secs = args.iter()
+            .find_map(|arg| {
+                if arg.starts_with("timeout=") {
+                    arg.strip_prefix("timeout=")?.parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(10); // Default: wait 10s for service response
         
         // Get username from PAM handle
         use pamsm::PamLibExt;
@@ -26,56 +39,56 @@ impl PamServiceModule for LinuxSupPam {
             Ok(Some(user_cstr)) => {
                 match user_cstr.to_str() {
                     Ok(user) => {
-                        eprintln!("LinuxSup: Authenticating user: {}", user);
+                        eprintln!("SupLinux: Authenticating user: {}", user);
                         user.to_string()
                     }
                     Err(_) => {
-                        eprintln!("LinuxSup: Invalid UTF-8 in username");
+                        eprintln!("SupLinux: Invalid UTF-8 in username");
                         return PamError::USER_UNKNOWN;
                     }
                 }
             }
             Ok(None) => {
-                eprintln!("LinuxSup: No username set in PAM");
+                eprintln!("SupLinux: No username set in PAM");
                 return PamError::USER_UNKNOWN;
             }
             Err(e) => {
-                eprintln!("LinuxSup: Failed to get username: {:?}", e);
+                eprintln!("SupLinux: Failed to get username: {:?}", e);
                 return PamError::USER_UNKNOWN;
             }
         };
 
         // Check if we're in a remote session
         if std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_TTY").is_ok() {
-            eprintln!("LinuxSup: Skipping face auth for remote session");
+            eprintln!("SupLinux: Skipping face auth for remote session");
             return PamError::AUTH_ERR;
         }
 
         // Check if we have a display
         if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
-            eprintln!("LinuxSup: No display available for face auth");
+            eprintln!("SupLinux: No display available for face auth");
             return PamError::AUTH_ERR;
         }
 
-        // Perform authentication
-        match perform_authentication(&username) {
+        // Perform authentication with PAM timeout
+        match perform_authentication(&username, pam_timeout_secs) {
             Ok(true) => {
-                eprintln!("LinuxSup: Face authentication successful for {}", username);
+                eprintln!("SupLinux: Face authentication successful for {}", username);
                 PamError::SUCCESS
             }
             Ok(false) => {
-                eprintln!("LinuxSup: Face authentication failed for {}", username);
+                eprintln!("SupLinux: Face authentication failed for {}", username);
                 PamError::AUTH_ERR
             }
             Err(e) => {
-                eprintln!("LinuxSup: Authentication error: {}", e);
+                eprintln!("SupLinux: Authentication error: {}", e);
                 PamError::SERVICE_ERR
             }
         }
     }
 }
 
-fn perform_authentication(username: &str) -> Result<bool> {
+fn perform_authentication(username: &str, pam_timeout_secs: u64) -> Result<bool> {
     // Generate random challenge for security
     let challenge = generate_challenge();
     
@@ -88,8 +101,9 @@ fn perform_authentication(username: &str) -> Result<bool> {
         }
     };
     
-    // Set timeout (service handles all auth logic, so we wait longer)
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    // Set socket timeout - how long PAM waits for service response
+    // The service has its own timeout for the actual authentication process
+    stream.set_read_timeout(Some(Duration::from_secs(pam_timeout_secs)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     
     // Create authentication request
@@ -128,17 +142,17 @@ fn perform_authentication(username: &str) -> Result<bool> {
                 // In production, we might want to verify the signature
                 // For now, we trust the service since it's on the same machine
             }
-            eprintln!("LinuxSup: Authentication {} - {}", 
+            eprintln!("SupLinux: Authentication {} - {}", 
                 if auth.success { "succeeded" } else { "failed" },
                 auth.message);
             Ok(auth.success)
         }
         Response::Error(msg) => {
-            eprintln!("LinuxSup: Service error: {}", msg);
+            eprintln!("SupLinux: Service error: {}", msg);
             Ok(false)
         }
         _ => {
-            eprintln!("LinuxSup: Unexpected response type");
+            eprintln!("SupLinux: Unexpected response type");
             Ok(false)
         }
     }
@@ -155,4 +169,4 @@ fn generate_challenge() -> Vec<u8> {
 // Service now handles K-of-N, embedding fusion, and lost face detection
 
 // Register the PAM module
-pam_module!(LinuxSupPam);
+pam_module!(SupLinuxPam);

@@ -1,4 +1,4 @@
-# LinuxSup - Face Authentication for Linux
+# SupLinux - Face Authentication for Linux
 
 A secure face authentication system for Linux, inspired by Windows Hello. Uses infrared cameras for enhanced security and integrates with Linux PAM for system-wide authentication.
 
@@ -15,7 +15,7 @@ A secure face authentication system for Linux, inspired by Windows Hello. Uses i
 
 ### Implemented
 - ✅ Native PAM module with challenge-response protocol
-- ✅ Privilege separation architecture (PAM + embedding service)
+- ✅ Privilege separation architecture (PAM + service)
 - ✅ IR camera support with auto-detection
 - ✅ K-of-N matching strategy for robust authentication
 - ✅ Rolling buffer with embedding fusion
@@ -63,27 +63,27 @@ ls models/
 ./build.sh
 
 # This builds:
-# - linuxsup (main CLI)
-# - linuxsup-embedding-service (systemd service)
-# - libpam_linuxsup.so (PAM module)
+# - suplinux (main CLI)
+# - suplinux-service (systemd service)
+# - libpam_suplinux.so (PAM module)
 ```
 
 4. **Test camera and detection:**
 ```bash
 # Test camera access
-cargo run --bin linuxsup -- --dev test-camera
+cargo run --bin suplinux -- --dev test-camera
 
 # Test face detection
-cargo run --bin linuxsup -- --dev test-detection
+cargo run --bin suplinux -- --dev test-detection
 ```
 
 5. **Test enrollment and authentication:**
 ```bash
 # Enroll yourself (saves to ./dev_data/)
-cargo run --bin linuxsup -- --dev enroll --username testuser
+cargo run --bin suplinux -- --dev enroll --username testuser
 
 # Test authentication
-cargo run --bin linuxsup -- --dev test --username testuser
+cargo run --bin suplinux -- --dev test --username testuser
 ```
 
 #### Production Installation
@@ -99,31 +99,46 @@ sudo ./install.sh
 
 ### Camera Configuration
 
-1. **Find your camera device:**
-```bash
-# List all video devices
-v4l2-ctl --list-devices
+The system supports automatic camera detection or manual configuration:
 
-# For Logitech BRIO IR camera, look for "Video Capture 4" or similar
-# Common IR camera indices: 2, 4, 51
-```
-
-2. **Update configuration:**
-Edit `configs/face-auth.toml`:
+1. **Automatic Detection (Recommended):**
 ```toml
 [camera]
-device_index = 0  # Change to your camera index
+device_index = 999  # Auto-detects IR camera, falls back to default
 width = 640
 height = 480
 ```
 
+2. **Manual Configuration:**
+```bash
+# Find your camera device
+suplinux detect-camera
+
+# Or list all video devices
+v4l2-ctl --list-devices
+```
+
+Then update `configs/face-auth.toml`:
+```toml
+[camera]
+device_index = 0  # Your camera index (0=default, 2=secondary, etc.)
+width = 640
+height = 480
+```
+
+**Camera Index Options:**
+- `999` - Auto-detect IR camera (recommended)
+- `0` - Default/primary camera
+- `2` - Secondary camera (common for laptops with IR)
+- Other - Specific device index from detection
+
 3. **Test camera capture:**
 ```bash
 # Normal mode (saves to current directory)
-cargo run --bin linuxsup -- test-camera
+cargo run --bin suplinux -- test-camera
 
 # Development mode (saves to ./dev_data/captures/)
-cargo run --bin linuxsup -- --dev test-camera
+cargo run --bin suplinux -- --dev test-camera
 ```
 
 ### Testing Face Detection
@@ -131,25 +146,25 @@ cargo run --bin linuxsup -- --dev test-camera
 1. **Basic detection test:**
 ```bash
 # Normal mode
-cargo run --bin linuxsup -- test-detection
+cargo run --bin suplinux -- test-detection
 
 # Development mode with debug output
-cargo run --bin linuxsup -- --dev test-detection
+cargo run --bin suplinux -- --dev test-detection
 ```
 
 2. **Enrollment:**
 ```bash
 # Normal mode (saves to system directories)
-cargo run --bin linuxsup -- enroll --username testuser
+cargo run --bin suplinux -- enroll --username testuser
 
 # Development mode (saves to ./dev_data/)
-cargo run --bin linuxsup -- --dev enroll --username testuser
+cargo run --bin suplinux -- --dev enroll --username testuser
 ```
 
 3. **Authentication test:**
 ```bash
 # Test authentication
-cargo run --bin linuxsup -- --dev test --username testuser
+cargo run --bin suplinux -- --dev test --username testuser
 ```
 
 ### Development Mode
@@ -176,10 +191,10 @@ The `--dev` flag enables development mode for safe testing:
 **Example Commands:**
 ```bash
 # All commands support --dev flag
-cargo run --bin linuxsup -- --dev test-camera
-cargo run --bin linuxsup -- --dev test-detection
-cargo run --bin linuxsup -- --dev enroll --username alice
-cargo run --bin linuxsup -- --dev test --username alice
+cargo run --bin suplinux -- --dev test-camera
+cargo run --bin suplinux -- --dev test-detection
+cargo run --bin suplinux -- --dev enroll --username alice
+cargo run --bin suplinux -- --dev test --username alice
 ```
 
 ### Troubleshooting
@@ -226,7 +241,7 @@ ls -la models/
 # -rw-r--r-- 1 user user  4397715 compare.onnx
 
 # Test model loading
-cargo run --bin linuxsup -- --dev test-detection
+cargo run --bin suplinux -- --dev test-detection
 ```
 
 **Note**: These are proprietary models. Contact the repository maintainer for access. The system will not work without these models.
@@ -246,24 +261,40 @@ cargo run --bin linuxsup -- --dev test-detection
 # Step 2: Install system-wide (requires root)
 sudo ./install.sh
 
-# Step 3: Start the embedding service
-sudo systemctl start linuxsup-embedding
-sudo systemctl enable linuxsup-embedding  # For automatic startup
+# Step 3: Start the service
+sudo systemctl start suplinux
+sudo systemctl enable suplinux  # For automatic startup
 
 # Step 4: Enroll yourself
-linuxsup enroll --username $USER
+suplinux enroll --username $USER
 
 # Step 5: Test authentication
-linuxsup test --username $USER
+suplinux test --username $USER
 
-# Step 6: Enable for sudo (optional):
-# ⚠️ ALWAYS keep a root shell open when modifying PAM!
-sudo cp examples/pam.d/sudo-with-face /etc/pam.d/sudo
+# Step 6: Enable face authentication system-wide (optional):
+sudo pam-auth-update
+# Select "Face authentication (SupLinux)" and press Enter
 ```
+
+### Enabling Face Authentication
+
+SupLinux integrates with the system's PAM configuration using `pam-auth-update`:
+
+1. Run: `sudo pam-auth-update`
+2. Select "Face authentication (SupLinux)" using spacebar
+3. Press Enter to apply
+
+Face authentication will then work automatically with:
+- sudo commands
+- System login (GDM/SDDM)
+- Lock screen
+- Any PAM-aware application
+
+To disable later, run `sudo pam-auth-update` again and deselect it.
 
 ### Configuration
 
-The system uses a TOML configuration file at `/etc/linuxsup/face-auth.toml`:
+The system uses a TOML configuration file at `/etc/suplinux/face-auth.toml`:
 
 ```toml
 [auth]
@@ -274,18 +305,18 @@ embedding_buffer_size = 3     # Rolling buffer size
 use_embedding_fusion = true   # Enable temporal fusion
 
 [camera]
-device_index = 51            # 999 for auto-detect
+device_index = 999           # Auto-detect IR camera (0 for default)
 warmup_frames = 3           # IR camera warmup
 ```
 
 ## Architecture
 
-LinuxSup now uses a secure architecture with privilege separation:
+SupLinux now uses a secure architecture with privilege separation:
 
 ```
 ┌─────────────┐     ┌────────────────┐     ┌──────────────────┐
 │ PAM Module  │────▶│  Unix Socket   │────▶│ Embedding Service│
-│(pam_linuxsup)     │ /run/linuxsup/ │     │ (unprivileged)  │
+│(pam_suplinux)     │ /run/suplinux/ │     │ (unprivileged)  │
 └─────────────┘     └────────────────┘     └──────────────────┘
         │                                            │
         ▼                                            ▼

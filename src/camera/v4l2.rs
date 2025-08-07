@@ -1,5 +1,4 @@
-use crate::error::{FaceAuthError, Result};
-use crate::config::Config;
+use crate::common::{FaceAuthError, Result, Config};
 use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
@@ -30,6 +29,65 @@ impl Camera {
         Self::new_with_device(device_index, config.clone())
     }
     
+    /// List all available cameras with their capabilities
+    pub fn list_all_cameras() -> Result<Vec<(u32, String, Vec<String>, bool)>> {
+        let mut cameras = Vec::new();
+        
+        // Scan /dev/video* devices
+        for entry in fs::read_dir("/dev")? {
+            let entry = entry?;
+            let path = entry.path();
+            let filename = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+                
+            if filename.starts_with("video") {
+                if let Some(index_str) = filename.strip_prefix("video") {
+                    if let Ok(index) = index_str.parse::<u32>() {
+                        // Try to open the device
+                        if let Ok(device) = Device::new(index as usize) {
+                            if let Ok(caps) = device.query_caps() {
+                                let mut features = Vec::new();
+                                let mut likely_ir = false;
+                                
+                                // Check capabilities
+                                if caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
+                                    features.push("VIDEO_CAPTURE".to_string());
+                                } else if caps.capabilities.contains(v4l::capability::Flags::META_CAPTURE) {
+                                    features.push("METADATA_CAPTURE (may work for IR)".to_string());
+                                }
+                                
+                                // Check supported formats
+                                let formats = device.enum_formats().unwrap_or_default();
+                                
+                                for fmt in &formats {
+                                    let fourcc_str = fmt.fourcc.str().unwrap_or("UNKNOWN");
+                                    if fourcc_str == "GREY" || fourcc_str == "Y8" || fourcc_str == "Y16" {
+                                        features.push(format!("Grayscale ({})", fourcc_str));
+                                        likely_ir = true;
+                                    } else if fourcc_str == "MJPG" || fourcc_str == "YUYV" {
+                                        features.push(format!("Color ({})", fourcc_str));
+                                    }
+                                }
+                                
+                                // Check if name suggests IR
+                                if caps.card.contains("BRIO") || caps.card.contains("IR") || caps.card.contains("Infrared") {
+                                    likely_ir = true;
+                                }
+                                
+                                cameras.push((index, caps.card.clone(), features, likely_ir));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort by index
+        cameras.sort_by_key(|c| c.0);
+        Ok(cameras)
+    }
+    
     /// Auto-detect IR camera by looking for devices with grayscale format
     pub fn detect_ir_camera() -> Result<u32> {
         println!("Auto-detecting IR camera...");
@@ -51,7 +109,10 @@ impl Camera {
                         if let Ok(device) = Device::new(index as usize) {
                             if let Ok(caps) = device.query_caps() {
                                 // Check if it's a video capture device
-                                if caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
+                                // Some devices (like BRIO IR) report as metadata but have video capture capability
+                                let has_video_cap = caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE);
+                                
+                                if has_video_cap {
                                     // Check supported formats
                                     let formats = device.enum_formats()
                                         .unwrap_or_default();
@@ -86,53 +147,20 @@ impl Camera {
         
         if let Some((index, name, _)) = candidates.first() {
             println!("Selected camera: /dev/video{} ({})", index, name);
-            
-            // For Logitech BRIO, if we selected video51, also check for video52
-            if *index == 51 {
-                if let Ok(device) = Device::new(52) {
-                    if let Ok(caps) = device.query_caps() {
-                        if caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
-                            println!("Using video52 instead of video51 for actual video capture");
-                            return Ok(52);
-                        }
-                    }
-                }
-            }
-            
             Ok(*index)
         } else {
-            Err(FaceAuthError::Camera("No suitable IR camera found. Please specify device index manually.".into()))
+            // No IR camera found, fall back to default camera
+            println!("No IR camera detected, falling back to default camera (device 0)");
+            println!("For better accuracy, consider using an IR camera or specifying device_index in config");
+            Ok(0)
         }
     }
 
     pub fn new_with_device(index: u32, config: Config) -> Result<Self> {
         println!("Opening camera device {}...", index);
         
-        // Special handling for known devices
-        let actual_index = match index {
-            51 => {
-                // Video51 might be metadata, try to find the actual video capture device
-                // Check if video52 is available and is a video capture device
-                if let Ok(test_device) = Device::new(52) {
-                    if let Ok(caps) = test_device.query_caps() {
-                        if caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
-                            println!("Using video52 instead of video51 for actual video capture");
-                            52
-                        } else {
-                            index
-                        }
-                    } else {
-                        index
-                    }
-                } else {
-                    index
-                }
-            },
-            _ => index,
-        };
-        
-        let device = Device::new(actual_index as usize)
-            .map_err(|e| FaceAuthError::Camera(format!("Failed to open camera {}: {}", actual_index, e)))?;
+        let device = Device::new(index as usize)
+            .map_err(|e| FaceAuthError::Camera(format!("Failed to open camera {}: {}", index, e)))?;
 
         // Check device capabilities
         let caps = device.query_caps()
@@ -140,11 +168,13 @@ impl Camera {
         
         println!("Device capabilities: {:?}", caps.capabilities);
         
+        // Check if device supports video capture
+        // Some devices like BRIO IR report as metadata but have video capture capability
         if !caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
-            return Err(FaceAuthError::Camera(format!(
-                "Device {} does not support video capture. Try a different device index.", 
-                actual_index
-            )));
+            // Special case: Some devices report only metadata but still work for video
+            // We'll warn but continue
+            println!("Warning: Device {} may not support standard video capture", index);
+            println!("Device capabilities: {:?}", caps.capabilities);
         }
 
         println!("Camera opened successfully. Getting current format...");

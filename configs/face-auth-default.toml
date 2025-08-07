@@ -1,0 +1,67 @@
+# Face Authentication Configuration - Default Camera Version
+# Use this configuration if you don't have an IR camera
+
+[camera]
+# Camera device index (0 for default camera, 999 for auto-detect IR camera)
+device_index = 0  # Use default camera
+# Camera resolution
+width = 640
+height = 480
+# Number of frames to warm up the camera
+warmup_frames = 3
+# Delay between warmup frames in milliseconds
+warmup_delay_ms = 100
+
+[models]
+# Path to face detection model
+detector_path = "models/detect.onnx"
+# Path to face recognition model
+recognizer_path = "models/compare.onnx"
+
+[auth]
+# Similarity threshold for face matching (0.0 to 1.0)
+# Lower values = more lenient, higher values = more strict
+# Note: May need adjustment for RGB cameras (try 0.55-0.65)
+similarity_threshold = 0.58
+
+# K-of-N matching: Require K successful matches out of N consecutive attempts
+# This prevents single lucky matches from granting access
+k_required_matches = 2      # Need 2 successful matches
+n_total_attempts = 4        # Out of 4 attempts (more lenient for RGB)
+
+# Rolling buffer for embedding fusion (improves accuracy)
+embedding_buffer_size = 3   # Keep last 3 embeddings for averaging
+use_embedding_fusion = true # Enable dynamic embedding fusion
+
+# Timeout settings
+timeout_seconds = 10         # Total authentication timeout (longer for RGB)
+lost_face_timeout = 3       # Timeout when face not detected
+
+# Detection confidence threshold (0.0 to 1.0)
+detection_confidence = 0.5  # Lower for RGB cameras
+
+[detector]
+# Face detection settings
+input_width = 640
+input_height = 640
+# IOU and NMS thresholds for duplicate detection removal
+iou_threshold = 0.4
+nms_threshold = 0.5
+
+[enrollment]
+# Number of images to capture during enrollment
+num_captures = 5
+# Interval between captures in milliseconds
+capture_interval_ms = 2000
+# Store averaged embedding for better accuracy
+store_averaged_embedding = true
+# Minimum quality score for enrollment (0.0 to 1.0)
+min_enrollment_quality = 0.55  # Lower for RGB cameras
+# ASCII preview dimensions for enrollment
+ascii_width = 60
+ascii_height = 30
+
+[security]
+# Future security settings (not yet implemented)
+enable_liveness_detection = false
+require_blink = false

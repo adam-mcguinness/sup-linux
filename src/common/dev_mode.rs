@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::fs;
-use crate::error::Result;
+use crate::common::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct DevMode {

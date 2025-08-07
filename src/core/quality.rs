@@ -1,5 +1,5 @@
-use crate::detector::FaceBox;
-use crate::recognizer::Embedding;
+use crate::core::detector::FaceBox;
+use crate::core::recognizer::Embedding;
 use image::DynamicImage;
 
 #[derive(Debug, Clone)]

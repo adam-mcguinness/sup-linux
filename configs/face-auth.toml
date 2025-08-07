@@ -1,8 +1,9 @@
 # Face Authentication Configuration
 
 [camera]
-# Camera device index (0 for default camera, 51 for Logitech BRIO IR camera, 999 for auto-detect)
-device_index = 51
+# Camera device index (0 for default camera, 999 for auto-detect IR camera)
+# Common values: 0 = default camera, 2 = secondary camera, 999 = auto-detect IR
+device_index = 51  # Logitech BRIO IR (metadata device)
 # Camera resolution
 width = 640
 height = 480

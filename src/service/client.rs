@@ -1,5 +1,5 @@
-use crate::error::{FaceAuthError, Result};
-use crate::protocol::{Request, Response, AuthRequest, EnrollRequest};
+use crate::common::{FaceAuthError, Result};
+use crate::service::protocol::{Request, Response, AuthRequest, EnrollRequest, EnhanceRequest};
 use std::os::unix::net::UnixStream;
 use std::io::{Read, Write};
 use std::time::{Duration, SystemTime};
@@ -15,9 +15,9 @@ pub struct ServiceClient {
 impl ServiceClient {
     pub fn new(dev_mode: bool) -> Self {
         let socket_path = if dev_mode {
-            "/tmp/linuxsup.sock".to_string()
+            "/tmp/suplinux.sock".to_string()
         } else {
-            "/run/linuxsup/embedding.sock".to_string()
+            "/run/suplinux/service.sock".to_string()
         };
         ServiceClient { socket_path, dev_mode }
     }
@@ -99,6 +99,48 @@ impl ServiceClient {
         }
     }
     
+    pub fn enhance(&mut self, username: &str, additional_captures: Option<u32>, replace_weak: bool) -> Result<()> {
+        // Ensure service is running
+        self.ensure_service_running()?;
+        
+        // Connect to service
+        let mut stream = self.connect_with_retry(3)?;
+        
+        // Create enhance request
+        let request = Request::Enhance(EnhanceRequest {
+            username: username.to_string(),
+            additional_captures,
+            replace_weak,
+        });
+        
+        // Send request
+        self.send_request(&mut stream, &request)?;
+        
+        // Read response
+        let response = self.read_response(&mut stream)?;
+        
+        match response {
+            Response::Enhance(enhance_resp) => {
+                if enhance_resp.success {
+                    println!("✅ {}", enhance_resp.message);
+                    println!("   Embeddings: {} → {} (replaced: {})", 
+                             enhance_resp.embeddings_before, 
+                             enhance_resp.embeddings_after,
+                             enhance_resp.replaced_count);
+                    Ok(())
+                } else {
+                    Err(FaceAuthError::Other(anyhow::anyhow!(enhance_resp.message)))
+                }
+            }
+            Response::Error(msg) => {
+                Err(FaceAuthError::Other(anyhow::anyhow!("Service error: {}", msg)))
+            }
+            _ => {
+                Err(FaceAuthError::Other(anyhow::anyhow!("Unexpected response type")))
+            }
+        }
+    }
+    
     pub fn ensure_service_running(&self) -> Result<()> {
         // Check if socket exists
         if Path::new(&self.socket_path).exists() {
@@ -111,17 +153,17 @@ impl ServiceClient {
         // Only auto-start in dev mode
         if !self.dev_mode {
             return Err(FaceAuthError::Other(anyhow::anyhow!(
-                "Embedding service is not running. Please start it with: sudo systemctl start linuxsup-embedding"
+                "Service is not running. Please start it with: sudo systemctl start suplinux"
             )));
         }
         
         // Start service in dev mode
-        println!("Starting embedding service in development mode...");
+        println!("Starting service in development mode...");
         
         let service_binary = std::env::current_exe()?
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Failed to get binary directory"))?
-            .join("linuxsup-embedding-service");
+            .join("suplinux-service");
         
         if !service_binary.exists() {
             return Err(FaceAuthError::Other(anyhow::anyhow!(
@@ -155,7 +197,7 @@ impl ServiceClient {
     fn connect_with_retry(&self, max_retries: u32) -> Result<UnixStream> {
         for attempt in 0..max_retries {
             match UnixStream::connect(&self.socket_path) {
-                Ok(mut stream) => {
+                Ok(stream) => {
                     // Set timeout
                     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
                     stream.set_write_timeout(Some(Duration::from_secs(10)))?;

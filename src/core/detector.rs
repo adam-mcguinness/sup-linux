@@ -1,5 +1,4 @@
-use crate::error::{FaceAuthError, Result};
-use crate::config::Config;
+use crate::common::{FaceAuthError, Result, Config};
 use ort::{Environment, Session, SessionBuilder, Value, GraphOptimizationLevel};
 use std::sync::Arc;
 use image::{DynamicImage, imageops::FilterType};

@@ -1,15 +1,15 @@
 [package]
-name = "pam_linuxsup"
+name = "pam_suplinux"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "pam_linuxsup"
+name = "pam_suplinux"
 crate-type = ["cdylib"]
 
 [dependencies]
 pamsm = { version = "0.5", features = ["libpam"] }
-linux_sup = { path = ".." }
+sup_linux = { path = ".." }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"

@@ -2,21 +2,21 @@
 members = [".", "pam_module"]
 
 [package]
-name = "linux_sup"
+name = "sup_linux"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "linux_sup"
+name = "sup_linux"
 path = "src/lib.rs"
 
 [[bin]]
-name = "linuxsup"
+name = "suplinux"
 path = "src/main.rs"
 
 [[bin]]
-name = "linuxsup-embedding-service"
-path = "src/bin/embedding_service.rs"
+name = "suplinux-service"
+path = "src/bin/service.rs"
 
 [dependencies]
 # Core

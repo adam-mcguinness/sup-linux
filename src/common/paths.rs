@@ -4,17 +4,17 @@ use std::path::PathBuf;
 // This module is kept for potential future use but simplified
 
 pub fn system_user_data_dir() -> PathBuf {
-    PathBuf::from("/var/lib/linuxsup/users")
+    PathBuf::from("/var/lib/suplinux/users")
 }
 
 pub fn system_enrollment_dir() -> PathBuf {
-    PathBuf::from("/var/lib/linuxsup/enrollment")
+    PathBuf::from("/var/lib/suplinux/enrollment")
 }
 
 pub fn system_config_file() -> PathBuf {
-    PathBuf::from("/etc/linuxsup/face-auth.toml")
+    PathBuf::from("/etc/suplinux/face-auth.toml")
 }
 
 pub fn system_models_dir() -> PathBuf {
-    PathBuf::from("/usr/share/linuxsup/models")
+    PathBuf::from("/usr/share/suplinux/models")
 }

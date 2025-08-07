@@ -1,10 +1,10 @@
-use linux_sup::{
+use sup_linux::{
     camera::Camera,
     config::Config,
     detector::FaceDetector,
     recognizer::{FaceRecognizer, cosine_similarity},
     error::Result,
-    protocol::{Request, Response, AuthRequest, AuthResponse, EnrollRequest, EnrollResponse},
+    protocol::{Request, Response, AuthRequest, AuthResponse, EnrollRequest, EnrollResponse, EnhanceRequest, EnhanceResponse},
     storage::UserStore,
 };
 use clap::Parser;
@@ -18,15 +18,15 @@ use sha2::{Sha256, Digest};
 use anyhow::Context as _;
 
 #[derive(Parser, Debug)]
-#[command(name = "linuxsup-embedding-service")]
-#[command(about = "LinuxSup face embedding service")]
+#[command(name = "suplinux-service")]
+#[command(about = "SupLinux authentication service")]
 struct Args {
     /// Run in development mode
     #[arg(long)]
     dev: bool,
     
     /// Socket path in dev mode
-    #[arg(long, default_value = "/tmp/linuxsup.sock")]
+    #[arg(long, default_value = "/tmp/suplinux.sock")]
     dev_socket: String,
     
     /// Data directory in dev mode
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     
-    tracing::info!("Starting LinuxSup embedding service (dev_mode: {})", args.dev);
+    tracing::info!("Starting SupLinux service (dev_mode: {})", args.dev);
     
     // Determine paths based on mode
     let (socket_path, data_dir, config_path) = if args.dev {
@@ -149,9 +149,9 @@ fn main() -> Result<()> {
         )
     } else {
         (
-            "/run/linuxsup/embedding.sock",
-            PathBuf::from("/var/lib/linuxsup"),
-            PathBuf::from("/etc/linuxsup/face-auth.toml"),
+            "/run/suplinux/service.sock",
+            PathBuf::from("/var/lib/suplinux"),
+            PathBuf::from("/etc/suplinux/face-auth.toml"),
         )
     };
     
@@ -247,6 +247,10 @@ fn handle_client(
             tracing::info!("Processing enrollment request for user: {}", enroll_req.username);
             handle_enroll_request(detector, recognizer, enroll_req, &peer_cred, config, data_dir)
         }
+        Request::Enhance(enhance_req) => {
+            tracing::info!("Processing enhance request for user: {}", enhance_req.username);
+            handle_enhance_request(detector, recognizer, enhance_req, &peer_cred, config, data_dir)
+        }
     };
     
     // Serialize response
@@ -299,7 +303,7 @@ fn handle_enroll_request(
     config: &Config,
     data_dir: &Path,
 ) -> Response {
-    use linux_sup::quality::QualityMetrics;
+    use sup_linux::quality::QualityMetrics;
     
     // Authorization check: Users can only enroll themselves unless they're root
     if peer_cred.uid != 0 {
@@ -483,7 +487,7 @@ fn handle_enroll_request(
     };
     
     // Create user data
-    let user_data = linux_sup::storage::UserData {
+    let user_data = sup_linux::storage::UserData {
         version: 1,
         username: request.username.clone(),
         embeddings,
@@ -661,7 +665,7 @@ fn perform_authentication(
 fn calculate_best_similarity(
     embedding: &[f32],
     embedding_buffer: &VecDeque<Vec<f32>>,
-    user_data: &linux_sup::storage::UserData,
+    user_data: &sup_linux::storage::UserData,
     use_fusion: bool,
 ) -> f32 {
     let mut best_similarity = 0.0f32;
@@ -730,4 +734,264 @@ fn generate_signature(embedding: &[f32], challenge: &[u8]) -> Vec<u8> {
     hasher.update(challenge);
     
     hasher.finalize().to_vec()
+}
+
+fn handle_enhance_request(
+    detector: &FaceDetector,
+    recognizer: &FaceRecognizer,
+    request: EnhanceRequest,
+    peer_cred: &PeerCredentials,
+    config: &Config,
+    data_dir: &Path,
+) -> Response {
+    use sup_linux::quality::QualityMetrics;
+    
+    // Authorization check: Users can only enhance themselves unless they're root
+    if peer_cred.uid != 0 {
+        let requesting_user = get_username_from_uid(peer_cred.uid);
+        if let Ok(req_user) = requesting_user {
+            if req_user != request.username {
+                tracing::warn!("User {} (UID {}) attempted to enhance as {}", 
+                    req_user, peer_cred.uid, request.username);
+                return Response::Enhance(EnhanceResponse {
+                    success: false,
+                    message: format!("Permission denied: You can only enhance your own enrollment"),
+                    embeddings_before: 0,
+                    embeddings_after: 0,
+                    replaced_count: 0,
+                });
+            }
+        } else {
+            tracing::warn!("Could not determine username for UID {}", peer_cred.uid);
+            return Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to verify user identity"),
+                embeddings_before: 0,
+                embeddings_after: 0,
+                replaced_count: 0,
+            });
+        }
+    }
+    
+    tracing::info!("Starting enhancement for user: {} (requested by UID: {})", 
+        request.username, peer_cred.uid);
+    
+    // Create user store
+    let store = match UserStore::new_with_paths(
+        data_dir.join("users"),
+        data_dir.join("enrollment"),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to initialize storage: {}", e),
+                embeddings_before: 0,
+                embeddings_after: 0,
+                replaced_count: 0,
+            });
+        }
+    };
+    
+    // Load existing user data
+    let mut user_data = match store.get_user(&request.username) {
+        Ok(data) => data,
+        Err(_) => {
+            return Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("User {} not found. Please enroll first.", request.username),
+                embeddings_before: 0,
+                embeddings_after: 0,
+                replaced_count: 0,
+            });
+        }
+    };
+    
+    let embeddings_before = user_data.embeddings.len();
+    
+    // Get enrollment images directory
+    let enrollment_dir = match store.get_enrollment_images_dir(&request.username) {
+        Ok(dir) => {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Response::Enhance(EnhanceResponse {
+                    success: false,
+                    message: format!("Failed to create enrollment directory: {}", e),
+                    embeddings_before,
+                    embeddings_after: embeddings_before,
+                    replaced_count: 0,
+                });
+            }
+            dir
+        }
+        Err(e) => {
+            return Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to get enrollment directory: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            });
+        }
+    };
+    
+    // Create camera just for this enhancement
+    let mut camera = match Camera::new(config) {
+        Ok(c) => c,
+        Err(e) => {
+            return Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to initialize camera: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            });
+        }
+    };
+    
+    // Capture additional images
+    let mut new_embeddings = Vec::new();
+    let mut new_quality_scores = Vec::new();
+    let additional_captures = request.additional_captures.unwrap_or(3);
+    let min_quality = config.enrollment.min_enrollment_quality;
+    
+    tracing::info!("Capturing {} additional images for enhancement", additional_captures);
+    
+    // Start camera session
+    let mut session = match camera.start_session() {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to start camera: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            });
+        }
+    };
+    
+    let mut captured = 0;
+    let mut attempts = 0;
+    let max_attempts = 30;
+    let capture_interval = Duration::from_millis(
+        config.enrollment.capture_interval_ms.unwrap_or(2000)
+    );
+    let mut last_capture_time = Instant::now();
+    
+    // Find next image index for saving
+    let mut next_image_idx = 0;
+    while enrollment_dir.join(format!("enhance_{}.jpg", next_image_idx)).exists() {
+        next_image_idx += 1;
+    }
+    
+    while captured < additional_captures && attempts < max_attempts {
+        attempts += 1;
+        
+        // Capture frame
+        let frame = match session.capture_frame() {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to capture frame: {}", e);
+                continue;
+            }
+        };
+        
+        // Detect faces
+        let faces = match detector.detect(&frame) {
+            Ok(f) if !f.is_empty() => f,
+            _ => continue,
+        };
+        
+        // Check if enough time has passed since last capture
+        if last_capture_time.elapsed() < capture_interval && captured > 0 {
+            continue;
+        }
+        
+        let face = &faces[0];
+        
+        // Calculate quality metrics
+        let quality = QualityMetrics::calculate(&frame, face);
+        
+        // Check if quality meets requirements
+        if !quality.meets_minimum_requirements(min_quality) {
+            tracing::debug!("Image quality too low: {:.2}", quality.overall_score);
+            continue;
+        }
+        
+        // Get embedding
+        let embedding = match recognizer.get_embedding(&frame, face) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to get embedding: {}", e);
+                continue;
+            }
+        };
+        
+        // Save enhancement image
+        let image_path = enrollment_dir.join(format!("enhance_{}.jpg", next_image_idx + captured));
+        if let Err(e) = frame.save(&image_path) {
+            tracing::warn!("Failed to save enhancement image: {}", e);
+        }
+        
+        new_embeddings.push(embedding);
+        new_quality_scores.push(quality.overall_score);
+        captured += 1;
+        last_capture_time = Instant::now();
+        
+        tracing::info!("Captured enhancement image {}/{} with quality {:.2}", 
+                     captured, additional_captures, quality.overall_score);
+    }
+    
+    if new_embeddings.is_empty() {
+        return Response::Enhance(EnhanceResponse {
+            success: false,
+            message: "Failed to capture any valid face images for enhancement".to_string(),
+            embeddings_before,
+            embeddings_after: embeddings_before,
+            replaced_count: 0,
+        });
+    }
+    
+    // Merge new embeddings with existing data
+    let (added_count, replaced_count) = store.merge_user_data(
+        &mut user_data,
+        new_embeddings,
+        new_quality_scores,
+        request.replace_weak
+    );
+    
+    // Save updated user data
+    match store.save_user_data(&user_data) {
+        Ok(_) => {
+            let embeddings_after = user_data.embeddings.len();
+            tracing::info!("Successfully enhanced user: {} (before: {}, after: {}, replaced: {})", 
+                         request.username, embeddings_before, embeddings_after, replaced_count);
+            Response::Enhance(EnhanceResponse {
+                success: true,
+                message: format!(
+                    "Successfully enhanced enrollment for '{}'. Added {} embeddings{}",
+                    request.username,
+                    added_count,
+                    if replaced_count > 0 {
+                        format!(", replaced {} weak embeddings", replaced_count)
+                    } else {
+                        String::new()
+                    }
+                ),
+                embeddings_before,
+                embeddings_after,
+                replaced_count,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to save enhanced user data: {}", e);
+            Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to save enhanced enrollment data: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            })
+        }
+    }
 }

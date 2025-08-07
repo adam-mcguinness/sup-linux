@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use crate::error::{FaceAuthError, Result};
+use crate::common::error::{FaceAuthError, Result};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -117,7 +117,7 @@ fn default_true_option() -> Option<bool> { Some(true) }
 impl Config {
     pub fn load() -> Result<Self> {
         // Try system config first for production deployment
-        let system_config = std::path::PathBuf::from("/etc/linuxsup/face-auth.toml");
+        let system_config = std::path::PathBuf::from("/etc/suplinux/face-auth.toml");
         if system_config.exists() {
             Self::load_from_path(&system_config)
         } else {

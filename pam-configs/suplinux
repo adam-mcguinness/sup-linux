@@ -1,0 +1,6 @@
+Name: Face authentication (SupLinux)
+Default: no
+Priority: 264
+Auth-Type: Primary
+Auth:
+	[success=end default=ignore]	pam_suplinux.so timeout=10

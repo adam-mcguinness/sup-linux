@@ -1,7 +1,6 @@
-use crate::error::Result;
+use crate::common::{Result, DevMode};
 use crate::storage::UserStore;
-use crate::recognizer::Embedding;
-use crate::dev_mode::DevMode;
+use crate::core::recognizer::Embedding;
 use std::fs;
 use std::path::PathBuf;
 

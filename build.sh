@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "LinuxSup Face Authentication - Build Script"
+echo "SupLinux Face Authentication - Build Script"
 echo "==========================================="
 echo
 
@@ -53,7 +53,7 @@ if [ -d "target/release" ]; then
 fi
 
 # Build the project
-echo "Building LinuxSup (this may take a few minutes)..."
+echo "Building SupLinux (this may take a few minutes)..."
 if ! cargo build --release --all; then
     echo "❌ Build failed. Please check error messages above."
     exit 1
@@ -64,9 +64,9 @@ echo "Verifying build artifacts..."
 
 # Check all required binaries
 REQUIRED_BINARIES=(
-    "target/release/linuxsup"
-    "target/release/linuxsup-embedding-service"
-    "target/release/libpam_linuxsup.so"
+    "target/release/suplinux"
+    "target/release/suplinux-service"
+    "target/release/libpam_suplinux.so"
 )
 
 MISSING_BINARIES=()
@@ -93,9 +93,9 @@ echo
 echo "✅ Build successful!"
 echo
 echo "All required components built:"
-echo "  - linuxsup (main CLI)"
-echo "  - linuxsup-embedding-service (systemd service)"
-echo "  - libpam_linuxsup.so (PAM module)"
+echo "  - suplinux (main CLI)"
+echo "  - suplinux-service (systemd service)"
+echo "  - libpam_suplinux.so (PAM module)"
 echo
 echo "Next steps:"
 echo "  1. Run the installation script: sudo ./install.sh"

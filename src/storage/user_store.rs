@@ -1,6 +1,5 @@
-use crate::error::{FaceAuthError, Result};
-use crate::recognizer::Embedding;
-use crate::dev_mode::DevMode;
+use crate::common::{FaceAuthError, Result, DevMode};
+use crate::core::recognizer::Embedding;
 use directories::ProjectDirs;
 use std::path::PathBuf;
 use std::fs;
@@ -114,5 +113,82 @@ impl UserStore {
     pub fn get_enrollment_images_dir(&self, username: &str) -> Result<PathBuf> {
         let user_dir = self.enrollment_images_dir.join(username);
         Ok(user_dir)
+    }
+
+    /// Merge new embeddings with existing user data
+    pub fn merge_user_data(&self, existing: &mut UserData, new_embeddings: Vec<Embedding>, 
+                          new_qualities: Vec<f32>, replace_weak: bool) -> (usize, usize) {
+        let initial_count = existing.embeddings.len();
+        let mut replaced_count = 0;
+        
+        if replace_weak && existing.embedding_qualities.is_some() {
+            // Find indices of weakest embeddings
+            let qualities = existing.embedding_qualities.as_ref().unwrap();
+            let mut quality_indices: Vec<(usize, f32)> = qualities
+                .iter()
+                .enumerate()
+                .map(|(i, &q)| (i, q))
+                .collect();
+            quality_indices.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            
+            // Replace weak embeddings with new ones if new ones are better
+            for (new_emb, new_qual) in new_embeddings.iter().zip(new_qualities.iter()) {
+                let mut replaced = false;
+                for &(idx, old_qual) in quality_indices.iter() {
+                    if *new_qual > old_qual && replaced_count < new_embeddings.len() {
+                        existing.embeddings[idx] = new_emb.clone();
+                        if let Some(ref mut quals) = existing.embedding_qualities {
+                            quals[idx] = *new_qual;
+                        }
+                        replaced = true;
+                        replaced_count += 1;
+                        break;
+                    }
+                }
+                
+                // If not replaced (all existing are better), append
+                if !replaced {
+                    existing.embeddings.push(new_emb.clone());
+                    if let Some(ref mut quals) = existing.embedding_qualities {
+                        quals.push(*new_qual);
+                    }
+                }
+            }
+        } else {
+            // Just append new embeddings
+            existing.embeddings.extend(new_embeddings);
+            match existing.embedding_qualities.as_mut() {
+                Some(quals) => quals.extend(new_qualities),
+                None => existing.embedding_qualities = Some(new_qualities),
+            }
+        }
+        
+        // Recalculate averaged embedding
+        existing.averaged_embedding = Some(Self::average_embeddings(&existing.embeddings));
+        
+        let final_count = existing.embeddings.len();
+        (final_count - initial_count, replaced_count)
+    }
+    
+    fn average_embeddings(embeddings: &[Embedding]) -> Embedding {
+        if embeddings.is_empty() {
+            return vec![];
+        }
+        
+        let embedding_size = embeddings[0].len();
+        let mut averaged = vec![0.0f32; embedding_size];
+        
+        for embedding in embeddings {
+            for (i, &value) in embedding.iter().enumerate() {
+                averaged[i] += value;
+            }
+        }
+        
+        let count = embeddings.len() as f32;
+        for value in &mut averaged {
+            *value /= count;
+        }
+        
+        averaged
     }
 }

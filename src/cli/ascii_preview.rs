@@ -1,4 +1,4 @@
-use crate::detector::FaceBox;
+use crate::core::detector::FaceBox;
 use image::DynamicImage;
 use std::io::{self, Write};
 use crossterm::{

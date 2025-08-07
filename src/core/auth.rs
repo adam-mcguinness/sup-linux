@@ -1,12 +1,12 @@
 use crate::{
-    ascii_preview::{AsciiRenderer, clear_screen, check_for_escape},
+    cli::ascii_preview::{AsciiRenderer, clear_screen, check_for_escape},
     camera::Camera,
-    config::Config,
-    detector::{FaceDetector, FaceBox},
-    dev_mode::DevMode,
-    error::{FaceAuthError, Result},
-    quality::{QualityMetrics, calculate_embedding_consistency},
-    recognizer::{FaceRecognizer, cosine_similarity, Embedding},
+    common::{Config, DevMode, FaceAuthError, Result},
+    core::{
+        detector::{FaceDetector, FaceBox},
+        quality::{QualityMetrics, calculate_embedding_consistency},
+        recognizer::{FaceRecognizer, cosine_similarity, Embedding},
+    },
     storage::{UserStore, UserData},
 };
 use std::time::{Duration, Instant};
@@ -663,7 +663,7 @@ pub fn test_detection_dev(dev_mode: &DevMode) -> Result<()> {
 }
 
 pub fn enroll_user_dev(username: &str, dev_mode: &DevMode) -> Result<()> {
-    use crate::service_client::ServiceClient;
+    use crate::service::ServiceClient;
     
     // Always use the service now (unified path)
     let mut client = ServiceClient::new(dev_mode.is_enabled());
@@ -673,11 +673,19 @@ pub fn enroll_user_dev(username: &str, dev_mode: &DevMode) -> Result<()> {
 // Removed enroll_via_service - now using ServiceClient for both dev and production
 
 pub fn authenticate_user_dev(username: &str, dev_mode: &DevMode) -> Result<bool> {
-    use crate::service_client::ServiceClient;
+    use crate::service::ServiceClient;
     
     // Always use the service now (unified path)
     let mut client = ServiceClient::new(dev_mode.is_enabled());
     client.test_auth(username)
+}
+
+pub fn enhance_user_dev(username: &str, additional_captures: u32, replace_weak: bool, dev_mode: &DevMode) -> Result<()> {
+    use crate::service::ServiceClient;
+    
+    // Always use the service now (unified path)
+    let mut client = ServiceClient::new(dev_mode.is_enabled());
+    client.enhance(username, Some(additional_captures), replace_weak)
 }
 
 // Helper function to average embeddings
