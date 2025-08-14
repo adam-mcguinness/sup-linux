@@ -45,7 +45,7 @@ A secure face authentication system for Linux, inspired by Windows Hello. Uses i
 
 1. **Clone and setup:**
 ```bash
-git clone https://github.com/yourusername/linuxSup.git
+git clone https://github.com/adam-mcguinness/linuxSup.git
 cd linuxSup
 ```
 
@@ -341,4 +341,4 @@ Current phase: **Phase 3 - Secure PAM Integration**
 
 ## License
 
-[Your License Here]
+Uhh still figuring this out please hold...
