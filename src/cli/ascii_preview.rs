@@ -74,6 +74,22 @@ impl AsciiRenderer {
         // No else branch - just show the ASCII art without any message when no face is detected
         // This prevents flashing when face detection temporarily fails between frames
         
+        // Add capture counter at the bottom
+        if captured > 0 || total > 0 {
+            let counter_text = if captured >= total {
+                format!("✅ Captured {}/{} images - Complete!", captured, total)
+            } else if captured > 0 {
+                format!("📸 Captured {}/{} images", captured, total)
+            } else {
+                format!("📷 Ready to capture {}/{} images", captured, total)
+            };
+            
+            // Place at bottom center
+            let bottom_y = self.height.saturating_sub(1);
+            let counter_x = (self.width / 2).saturating_sub(counter_text.len() / 2);
+            self.overlay_text(&mut grid, &counter_text, counter_x, bottom_y);
+        }
+        
         self.grid_to_string(&grid)
     }
 
@@ -186,7 +202,7 @@ impl AsciiRenderer {
                 }
             })
             .collect::<Vec<_>>()
-            .join("\r\n")  // Use explicit carriage return + newline
+            .join("\n")  // Use regular newlines
     }
 }
 

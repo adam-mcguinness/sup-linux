@@ -19,6 +19,7 @@ pub struct AuthRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EnrollRequest {
     pub username: String,
+    pub enable_preview: bool,  // Enable ASCII preview during enrollment
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -26,6 +27,7 @@ pub struct EnhanceRequest {
     pub username: String,
     pub additional_captures: Option<u32>,
     pub replace_weak: bool,
+    pub enable_preview: bool,  // Enable ASCII preview during enhancement
 }
 
 // Response types
@@ -60,6 +62,24 @@ pub struct EnhanceResponse {
     pub embeddings_after: usize,
     pub replaced_count: usize,
 }
+
+// Streaming messages for real-time updates
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum StreamMessage {
+    PreviewFrame {
+        ascii: String,      // ASCII art representation of camera frame
+        captured: usize,    // Number of images captured so far
+        total: usize,       // Total images to capture
+    },
+    StatusUpdate {
+        message: String,    // Status message to display
+    },
+    Complete,              // Enrollment/enhancement complete, final response follows
+}
+
+// Message type indicators for stream protocol
+pub const MSG_TYPE_RESPONSE: u8 = 0;  // Final response
+pub const MSG_TYPE_STREAM: u8 = 1;    // Stream update
 
 // Socket path constant
 pub const SOCKET_PATH: &str = "/run/suplinux/service.sock";

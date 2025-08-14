@@ -17,7 +17,7 @@ pub struct SupLinuxPam;
 
 impl PamServiceModule for SupLinuxPam {
     fn authenticate(pamh: Pam, _flags: PamFlags, args: Vec<String>) -> PamError {
-        eprintln!("SupLinux: PAM module authenticate() called");
+        // eprintln!("SupLinux: PAM module authenticate() called");
         
         // Parse timeout from args (format: "timeout=10")
         // This is how long the PAM module waits for the service to respond
@@ -39,49 +39,37 @@ impl PamServiceModule for SupLinuxPam {
             Ok(Some(user_cstr)) => {
                 match user_cstr.to_str() {
                     Ok(user) => {
-                        eprintln!("SupLinux: Authenticating user: {}", user);
+                        // eprintln!("SupLinux: Authenticating user: {}", user);
                         user.to_string()
                     }
                     Err(_) => {
-                        eprintln!("SupLinux: Invalid UTF-8 in username");
+                        // eprintln!("SupLinux: Invalid UTF-8 in username");
                         return PamError::USER_UNKNOWN;
                     }
                 }
             }
             Ok(None) => {
-                eprintln!("SupLinux: No username set in PAM");
+                // eprintln!("SupLinux: No username set in PAM");
                 return PamError::USER_UNKNOWN;
             }
             Err(e) => {
-                eprintln!("SupLinux: Failed to get username: {:?}", e);
+                // eprintln!("SupLinux: Failed to get username: {:?}", e);
                 return PamError::USER_UNKNOWN;
             }
         };
 
-        // Check if we're in a remote session
-        if std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_TTY").is_ok() {
-            eprintln!("SupLinux: Skipping face auth for remote session");
-            return PamError::AUTH_ERR;
-        }
-
-        // Check if we have a display
-        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
-            eprintln!("SupLinux: No display available for face auth");
-            return PamError::AUTH_ERR;
-        }
-
         // Perform authentication with PAM timeout
         match perform_authentication(&username, pam_timeout_secs) {
             Ok(true) => {
-                eprintln!("SupLinux: Face authentication successful for {}", username);
+                // eprintln!("SupLinux: Face authentication successful for {}", username);
                 PamError::SUCCESS
             }
             Ok(false) => {
-                eprintln!("SupLinux: Face authentication failed for {}", username);
+                // eprintln!("SupLinux: Face authentication failed for {}", username);
                 PamError::AUTH_ERR
             }
             Err(e) => {
-                eprintln!("SupLinux: Authentication error: {}", e);
+                // eprintln!("SupLinux: Authentication error: {}", e);
                 PamError::SERVICE_ERR
             }
         }
@@ -96,7 +84,7 @@ fn perform_authentication(username: &str, pam_timeout_secs: u64) -> Result<bool>
     let mut stream = match UnixStream::connect(SOCKET_PATH) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to connect to embedding service: {}", e);
+            // eprintln!("Failed to connect to embedding service: {}", e);
             return Ok(false);
         }
     };
@@ -142,17 +130,17 @@ fn perform_authentication(username: &str, pam_timeout_secs: u64) -> Result<bool>
                 // In production, we might want to verify the signature
                 // For now, we trust the service since it's on the same machine
             }
-            eprintln!("SupLinux: Authentication {} - {}", 
-                if auth.success { "succeeded" } else { "failed" },
-                auth.message);
+            // eprintln!("SupLinux: Authentication {} - {}", 
+            //     if auth.success { "succeeded" } else { "failed" },
+            //     auth.message);
             Ok(auth.success)
         }
         Response::Error(msg) => {
-            eprintln!("SupLinux: Service error: {}", msg);
+            // eprintln!("SupLinux: Service error: {}", msg);
             Ok(false)
         }
         _ => {
-            eprintln!("SupLinux: Unexpected response type");
+            // eprintln!("SupLinux: Unexpected response type");
             Ok(false)
         }
     }

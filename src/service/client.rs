@@ -1,11 +1,15 @@
 use crate::common::{FaceAuthError, Result};
-use crate::service::protocol::{Request, Response, AuthRequest, EnrollRequest, EnhanceRequest};
+use crate::service::protocol::{
+    Request, Response, AuthRequest, EnrollRequest, EnhanceRequest,
+    StreamMessage, MSG_TYPE_RESPONSE, MSG_TYPE_STREAM
+};
 use std::os::unix::net::UnixStream;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::time::{Duration, SystemTime};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use rand::{Rng, thread_rng};
+use crossterm::{terminal, cursor};
 
 pub struct ServiceClient {
     socket_path: String,
@@ -29,16 +33,17 @@ impl ServiceClient {
         // Connect to service
         let mut stream = self.connect_with_retry(3)?;
         
-        // Create enrollment request
+        // Create enrollment request with preview enabled
         let request = Request::Enroll(EnrollRequest {
             username: username.to_string(),
+            enable_preview: true,  // Always enable preview for better UX
         });
         
         // Send request
         self.send_request(&mut stream, &request)?;
         
-        // Read response
-        let response = self.read_response(&mut stream)?;
+        // Handle streaming preview if enabled
+        let response = self.read_enrollment_with_preview(&mut stream)?;
         
         match response {
             Response::Enroll(enroll_resp) => {
@@ -106,18 +111,19 @@ impl ServiceClient {
         // Connect to service
         let mut stream = self.connect_with_retry(3)?;
         
-        // Create enhance request
+        // Create enhance request with preview enabled
         let request = Request::Enhance(EnhanceRequest {
             username: username.to_string(),
             additional_captures,
             replace_weak,
+            enable_preview: true,  // Always enable preview for better UX
         });
         
         // Send request
         self.send_request(&mut stream, &request)?;
         
-        // Read response
-        let response = self.read_response(&mut stream)?;
+        // Handle streaming preview if enabled
+        let response = self.read_enrollment_with_preview(&mut stream)?;
         
         match response {
             Response::Enhance(enhance_resp) => {
@@ -178,7 +184,7 @@ impl ServiceClient {
             .arg(&self.socket_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())  // Suppress stderr to avoid interfering with ASCII preview
             .spawn()
             .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to start service: {}", e)))?;
         
@@ -248,6 +254,141 @@ impl ServiceClient {
             .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to deserialize response: {}", e)))?;
         
         Ok(response)
+    }
+    
+    fn read_enrollment_with_preview(&self, stream: &mut UnixStream) -> Result<Response> {
+        // Track the preview area
+        let mut preview_height = 0;
+        let mut first_frame = true;
+        
+        let result = (|| -> Result<Response> {
+            loop {
+                // Read message type indicator
+                let mut type_buf = [0u8; 1];
+                stream.read_exact(&mut type_buf)?;
+                
+                // Read message length
+                let mut len_buf = [0u8; 4];
+                stream.read_exact(&mut len_buf)?;
+                let msg_len = u32::from_le_bytes(len_buf) as usize;
+                
+                if msg_len > 1024 * 1024 {
+                    return Err(FaceAuthError::Other(anyhow::anyhow!("Message too large")));
+                }
+                
+                // Read message data
+                let mut msg_buf = vec![0u8; msg_len];
+                stream.read_exact(&mut msg_buf)?;
+                
+                match type_buf[0] {
+                    MSG_TYPE_STREAM => {
+                        // Handle stream message
+                        let stream_msg: StreamMessage = bincode::deserialize(&msg_buf)
+                            .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to deserialize stream message: {}", e)))?;
+                        
+                        match stream_msg {
+                            StreamMessage::PreviewFrame { ascii, captured: _, total: _ } => {
+                                // Split ASCII into lines for proper handling
+                                let lines: Vec<&str> = ascii.lines().collect();
+                                let frame_height = lines.len();
+                                
+                                if first_frame {
+                                    // First frame - just print it
+                                    println!("\n📷 Starting enrollment - look at the camera:");
+                                    
+                                    // Print all lines, keeping track of cursor position
+                                    for (i, line) in lines.iter().enumerate() {
+                                        if i < lines.len() - 1 {
+                                            println!("{}", line);
+                                        } else {
+                                            // Last line - use print! to stay on same line
+                                            print!("{}", line);
+                                            io::stdout().flush().ok();
+                                        }
+                                    }
+                                    preview_height = frame_height;
+                                    first_frame = false;
+                                } else {
+                                    // Move cursor back to the start of the first line of the preview
+                                    // Since we used print! on the last line, cursor is at end of last line
+                                    // We need to go up (height - 1) lines and then to start of line
+                                    if preview_height > 0 {
+                                        crossterm::execute!(
+                                            io::stdout(),
+                                            cursor::MoveUp((preview_height - 1) as u16),
+                                            cursor::MoveToColumn(0)
+                                        ).ok();
+                                    }
+                                    
+                                    // Overwrite each line
+                                    for (i, line) in lines.iter().enumerate() {
+                                        // Clear the current line first
+                                        crossterm::execute!(
+                                            io::stdout(),
+                                            terminal::Clear(terminal::ClearType::CurrentLine)
+                                        ).ok();
+                                        
+                                        if i < lines.len() - 1 {
+                                            println!("{}", line);
+                                        } else {
+                                            // Last line - use print! to stay on same line
+                                            print!("{}", line);
+                                            io::stdout().flush().ok();
+                                        }
+                                    }
+                                    
+                                    // If new frame is shorter, we need to clear the extra lines
+                                    if frame_height < preview_height {
+                                        // Move to next line after current frame
+                                        println!();
+                                        
+                                        // Clear the extra lines
+                                        for _ in frame_height..preview_height {
+                                            crossterm::execute!(
+                                                io::stdout(),
+                                                terminal::Clear(terminal::ClearType::CurrentLine)
+                                            ).ok();
+                                            println!();
+                                        }
+                                        
+                                        // Move back to end of actual frame
+                                        crossterm::execute!(
+                                            io::stdout(),
+                                            cursor::MoveUp((preview_height - frame_height + 1) as u16)
+                                        ).ok();
+                                    }
+                                    
+                                    preview_height = frame_height;
+                                }
+                                
+                                io::stdout().flush().ok();
+                            }
+                            StreamMessage::StatusUpdate { message: _ } => {
+                                // Status updates appear below the preview
+                                // Don't print during streaming to avoid disrupting the display
+                                // These will be shown in the final response
+                            }
+                            StreamMessage::Complete => {
+                                // Move cursor below preview for final message
+                                println!("\n"); // Add spacing before final message
+                                continue;
+                            }
+                        }
+                    }
+                    MSG_TYPE_RESPONSE => {
+                        // Final response received
+                        let response: Response = bincode::deserialize(&msg_buf)
+                            .map_err(|e| FaceAuthError::Other(anyhow::anyhow!("Failed to deserialize response: {}", e)))?;
+                        return Ok(response);
+                    }
+                    _ => {
+                        return Err(FaceAuthError::Other(anyhow::anyhow!("Unknown message type")));
+                    }
+                }
+            }
+        })();
+        
+        result
     }
 }
 

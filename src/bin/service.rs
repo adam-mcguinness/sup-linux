@@ -4,8 +4,12 @@ use sup_linux::{
     detector::FaceDetector,
     recognizer::{FaceRecognizer, cosine_similarity},
     error::Result,
-    protocol::{Request, Response, AuthRequest, AuthResponse, EnrollRequest, EnrollResponse, EnhanceRequest, EnhanceResponse},
+    protocol::{
+        Request, Response, AuthRequest, AuthResponse, EnrollRequest, EnrollResponse, 
+        EnhanceRequest, EnhanceResponse, StreamMessage, MSG_TYPE_RESPONSE, MSG_TYPE_STREAM
+    },
     storage::UserStore,
+    cli::ascii_preview::AsciiRenderer,
 };
 use clap::Parser;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -237,31 +241,30 @@ fn handle_client(
     let request: Request = bincode::deserialize(&request_buf)
         .map_err(|e| anyhow::anyhow!("Failed to deserialize request: {}", e))?;
     
-    // Process request based on type
-    let response = match request {
+    // Process request based on type - enrollment/enhance may stream updates
+    match request {
         Request::Authenticate(auth_req) => {
             tracing::info!("Processing auth request for user: {}", auth_req.username);
-            handle_auth_request(detector, recognizer, auth_req, config, data_dir)
+            let response = handle_auth_request(detector, recognizer, auth_req, config, data_dir);
+            
+            // Send response (no streaming for auth)
+            let response_data = bincode::serialize(&response)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+            let response_len = (response_data.len() as u32).to_le_bytes();
+            
+            stream.write_all(&response_len)?;
+            stream.write_all(&response_data)?;
+            stream.flush()?;
         }
         Request::Enroll(enroll_req) => {
             tracing::info!("Processing enrollment request for user: {}", enroll_req.username);
-            handle_enroll_request(detector, recognizer, enroll_req, &peer_cred, config, data_dir)
+            handle_enroll_request_with_stream(&mut stream, detector, recognizer, enroll_req, &peer_cred, config, data_dir)?;
         }
         Request::Enhance(enhance_req) => {
             tracing::info!("Processing enhance request for user: {}", enhance_req.username);
-            handle_enhance_request(detector, recognizer, enhance_req, &peer_cred, config, data_dir)
+            handle_enhance_request_with_stream(&mut stream, detector, recognizer, enhance_req, &peer_cred, config, data_dir)?;
         }
-    };
-    
-    // Serialize response
-    let response_data = bincode::serialize(&response)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
-    let response_len = (response_data.len() as u32).to_le_bytes();
-    
-    // Send response
-    stream.write_all(&response_len)?;
-    stream.write_all(&response_data)?;
-    stream.flush()?;
+    }
     
     Ok(())
 }
@@ -293,6 +296,612 @@ fn handle_auth_request(
             Response::Error(format!("Authentication failed: {}", e))
         }
     }
+}
+
+// Helper function to format enrollment report
+fn format_enrollment_report(
+    username: &str,
+    captured: usize,
+    total: usize,
+    quality_scores: &[f32],
+    consistency: f32,
+    success: bool,
+    width: usize,
+    height: usize,
+) -> String {
+    let mut lines = Vec::new();
+    
+    // Header
+    lines.push("╔══════════════════════════════════════════════════════╗".to_string());
+    lines.push("║         ENROLLMENT COMPLETE - REPORT                 ║".to_string());
+    lines.push("╚══════════════════════════════════════════════════════╝".to_string());
+    lines.push(String::new());
+    
+    // User and status
+    lines.push(format!("User: {}", username));
+    if success {
+        lines.push(format!("Status: ✅ SUCCESS ({}/{} captures)", captured, total));
+    } else {
+        lines.push(format!("Status: ❌ FAILED ({}/{} captures)", captured, total));
+    }
+    lines.push(String::new());
+    
+    // Quality scores if we have any captures
+    if !quality_scores.is_empty() {
+        lines.push("📊 Quality Scores:".to_string());
+        let mut total_quality = 0.0;
+        for (i, score) in quality_scores.iter().enumerate() {
+            let percentage = (score * 100.0) as u32;
+            let bar_length = (percentage as usize * 20) / 100;
+            let bar = "█".repeat(bar_length);
+            let empty = "░".repeat(20_usize.saturating_sub(bar_length));
+            lines.push(format!("  Capture {}: [{}{}] {}%", i + 1, bar, empty, percentage));
+            total_quality += score;
+        }
+        lines.push(String::new());
+        
+        // Average quality
+        let avg_quality = total_quality / quality_scores.len() as f32;
+        let avg_percentage = (avg_quality * 100.0) as u32;
+        let rating = if avg_quality >= 0.8 {
+            "Excellent ⭐⭐⭐⭐⭐"
+        } else if avg_quality >= 0.7 {
+            "Good ⭐⭐⭐⭐"
+        } else if avg_quality >= 0.6 {
+            "Acceptable ⭐⭐⭐"
+        } else {
+            "Poor ⭐⭐"
+        };
+        lines.push(format!("📈 Average Quality: {}% ({})", avg_percentage, rating));
+        
+        // Consistency score
+        let consistency_percentage = (consistency * 100.0) as u32;
+        let consistency_rating = if consistency >= 0.85 {
+            "Excellent - Optimal variation"
+        } else if consistency >= 0.75 {
+            "Good - Well balanced"
+        } else if consistency >= 0.65 {
+            "Acceptable - Adequate"
+        } else {
+            "Poor - Too inconsistent"
+        };
+        lines.push(format!("🔄 Consistency: {}% ({})", consistency_percentage, consistency_rating));
+        lines.push(String::new());
+    }
+    
+    // Final message
+    if success {
+        lines.push("✅ Enrollment successful!".to_string());
+        lines.push(format!("   {} high-quality face captures saved", captured));
+    } else {
+        lines.push("❌ Enrollment failed!".to_string());
+        lines.push(String::new());
+        lines.push("⚠️ Suggestions:".to_string());
+        if captured == 0 {
+            lines.push("   • Ensure your face is visible to the camera".to_string());
+            lines.push("   • Check lighting conditions".to_string());
+            lines.push("   • Remove glasses if wearing them".to_string());
+        } else if captured < total {
+            lines.push("   • Keep your face in view throughout enrollment".to_string());
+            lines.push("   • Maintain consistent distance from camera".to_string());
+            lines.push("   • Try better lighting conditions".to_string());
+        }
+        if !quality_scores.is_empty() {
+            let avg_quality = quality_scores.iter().sum::<f32>() / quality_scores.len() as f32;
+            if avg_quality < 0.6 {
+                lines.push("   • Image quality was too low".to_string());
+                lines.push("   • Clean the camera lens".to_string());
+            }
+        }
+    }
+    
+    // Pad to requested height if needed
+    while lines.len() < height {
+        lines.push(String::new());
+    }
+    
+    // Ensure all lines are properly padded to width
+    lines.iter()
+        .take(height)
+        .map(|line| {
+            if line.len() > width {
+                line.chars().take(width).collect()
+            } else {
+                format!("{:width$}", line, width = width)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Helper function to format enhancement report
+fn format_enhancement_report(
+    username: &str,
+    captured: usize,
+    total: usize,
+    embeddings_before: usize,
+    embeddings_after: usize,
+    quality_scores: &[f32],
+    replaced: usize,
+    success: bool,
+    width: usize,
+    height: usize,
+) -> String {
+    let mut lines = Vec::new();
+    
+    // Header
+    lines.push("╔══════════════════════════════════════════════════════╗".to_string());
+    lines.push("║        ENHANCEMENT COMPLETE - REPORT                 ║".to_string());
+    lines.push("╚══════════════════════════════════════════════════════╝".to_string());
+    lines.push(String::new());
+    
+    // User and status
+    lines.push(format!("User: {}", username));
+    if success {
+        lines.push(format!("Status: ✅ SUCCESS ({}/{} new captures)", captured, total));
+    } else {
+        lines.push(format!("Status: ⚠️  PARTIAL ({}/{} new captures)", captured, total));
+    }
+    lines.push(String::new());
+    
+    // Embedding changes
+    lines.push("📊 Embedding Changes:".to_string());
+    lines.push(format!("  Before: {} embeddings", embeddings_before));
+    lines.push(format!("  After:  {} embeddings", embeddings_after));
+    if replaced > 0 {
+        lines.push(format!("  Replaced: {} weak embeddings", replaced));
+    } else {
+        lines.push(format!("  Added:  {} new embeddings", embeddings_after - embeddings_before));
+    }
+    lines.push(String::new());
+    
+    // Quality scores for new captures
+    if !quality_scores.is_empty() {
+        lines.push("📈 New Capture Quality:".to_string());
+        for (i, score) in quality_scores.iter().enumerate() {
+            let percentage = (score * 100.0) as u32;
+            let bar_length = (percentage as usize * 20) / 100;
+            let bar = "█".repeat(bar_length);
+            let empty = "░".repeat(20_usize.saturating_sub(bar_length));
+            lines.push(format!("  Capture {}: [{}{}] {}%", i + 1, bar, empty, percentage));
+        }
+        
+        let avg_quality = quality_scores.iter().sum::<f32>() / quality_scores.len() as f32;
+        let avg_percentage = (avg_quality * 100.0) as u32;
+        lines.push(format!("  Average: {}%", avg_percentage));
+        lines.push(String::new());
+    }
+    
+    // Final message
+    if success && captured > 0 {
+        lines.push("✅ Enhancement successful!".to_string());
+        lines.push("   Your enrollment is now more robust".to_string());
+    } else if captured > 0 {
+        lines.push("⚠️  Partial enhancement completed".to_string());
+        lines.push(format!("   Added {} new captures", captured));
+    } else {
+        lines.push("❌ Enhancement failed!".to_string());
+        lines.push("   No new captures were added".to_string());
+    }
+    
+    // Pad to requested height if needed
+    while lines.len() < height {
+        lines.push(String::new());
+    }
+    
+    // Ensure all lines are properly padded to width
+    lines.iter()
+        .take(height)
+        .map(|line| {
+            if line.len() > width {
+                line.chars().take(width).collect()
+            } else {
+                format!("{:width$}", line, width = width)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Helper function to send stream messages
+fn send_stream_message(stream: &mut UnixStream, msg: &StreamMessage) -> Result<()> {
+    let msg_data = bincode::serialize(msg)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize stream message: {}", e))?;
+    let msg_len = (msg_data.len() as u32).to_le_bytes();
+    
+    stream.write_all(&[MSG_TYPE_STREAM])?;
+    stream.write_all(&msg_len)?;
+    stream.write_all(&msg_data)?;
+    stream.flush()?;
+    
+    Ok(())
+}
+
+// Helper function to send final response
+fn send_final_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
+    let response_data = bincode::serialize(response)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+    let response_len = (response_data.len() as u32).to_le_bytes();
+    
+    stream.write_all(&[MSG_TYPE_RESPONSE])?;
+    stream.write_all(&response_len)?;
+    stream.write_all(&response_data)?;
+    stream.flush()?;
+    
+    Ok(())
+}
+
+// Wrapper function that handles streaming for enrollment
+fn handle_enroll_request_with_stream(
+    stream: &mut UnixStream,
+    detector: &FaceDetector,
+    recognizer: &FaceRecognizer,
+    request: EnrollRequest,
+    peer_cred: &PeerCredentials,
+    config: &Config,
+    data_dir: &Path,
+) -> Result<()> {
+    // Check if preview is enabled
+    if request.enable_preview {
+        // Call the enhanced version with streaming
+        let response = handle_enroll_request_streaming(
+            stream,
+            detector,
+            recognizer,
+            request,
+            peer_cred,
+            config,
+            data_dir,
+        )?;
+        
+        // Send complete message followed by final response
+        send_stream_message(stream, &StreamMessage::Complete)?;
+        send_final_response(stream, &response)?;
+    } else {
+        // Call the original non-streaming version
+        let response = handle_enroll_request(
+            detector,
+            recognizer,
+            request,
+            peer_cred,
+            config,
+            data_dir,
+        );
+        
+        // Send response without streaming
+        send_final_response(stream, &response)?;
+    }
+    
+    Ok(())
+}
+
+// Wrapper function that handles streaming for enhancement
+fn handle_enhance_request_with_stream(
+    stream: &mut UnixStream,
+    detector: &FaceDetector,
+    recognizer: &FaceRecognizer,
+    request: EnhanceRequest,
+    peer_cred: &PeerCredentials,
+    config: &Config,
+    data_dir: &Path,
+) -> Result<()> {
+    // Check if preview is enabled
+    if request.enable_preview {
+        // Call the enhanced version with streaming
+        let response = handle_enhance_request_streaming(
+            stream,
+            detector,
+            recognizer,
+            request,
+            peer_cred,
+            config,
+            data_dir,
+        )?;
+        
+        // Send complete message followed by final response
+        send_stream_message(stream, &StreamMessage::Complete)?;
+        send_final_response(stream, &response)?;
+    } else {
+        // Call the original non-streaming version
+        let response = handle_enhance_request(
+            detector,
+            recognizer,
+            request,
+            peer_cred,
+            config,
+            data_dir,
+        );
+        
+        // Send response without streaming
+        send_final_response(stream, &response)?;
+    }
+    
+    Ok(())
+}
+
+// Streaming version of enrollment that sends ASCII preview frames
+fn handle_enroll_request_streaming(
+    stream: &mut UnixStream,
+    detector: &FaceDetector,
+    recognizer: &FaceRecognizer,
+    request: EnrollRequest,
+    peer_cred: &PeerCredentials,
+    config: &Config,
+    data_dir: &Path,
+) -> Result<Response> {
+    use sup_linux::quality::QualityMetrics;
+    
+    // Authorization check: Users can only enroll themselves unless they're root
+    if peer_cred.uid != 0 {
+        let requesting_user = get_username_from_uid(peer_cred.uid);
+        if let Ok(req_user) = requesting_user {
+            if req_user != request.username {
+                tracing::warn!("User {} (UID {}) attempted to enroll as {}", 
+                    req_user, peer_cred.uid, request.username);
+                return Ok(Response::Enroll(EnrollResponse {
+                    success: false,
+                    message: format!("Permission denied: You can only enroll yourself"),
+                }));
+            }
+        } else {
+            tracing::warn!("Could not determine username for UID {}", peer_cred.uid);
+            return Ok(Response::Enroll(EnrollResponse {
+                success: false,
+                message: format!("Failed to verify user identity"),
+            }));
+        }
+    }
+    
+    tracing::info!("Starting streaming enrollment for user: {} (requested by UID: {})", 
+        request.username, peer_cred.uid);
+    
+    // Create user store with appropriate paths
+    let store = match UserStore::new_with_paths(
+        data_dir.join("users"),
+        data_dir.join("enrollment"),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(Response::Enroll(EnrollResponse {
+                success: false,
+                message: format!("Failed to initialize storage: {}", e),
+            }));
+        }
+    };
+    
+    // Create enrollment images directory for this user
+    let enrollment_dir = match store.get_enrollment_images_dir(&request.username) {
+        Ok(dir) => {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Ok(Response::Enroll(EnrollResponse {
+                    success: false,
+                    message: format!("Failed to create enrollment directory: {}", e),
+                }));
+            }
+            dir
+        }
+        Err(e) => {
+            return Ok(Response::Enroll(EnrollResponse {
+                success: false,
+                message: format!("Failed to get enrollment directory: {}", e),
+            }));
+        }
+    };
+    
+    // Create camera just for this enrollment
+    let mut camera = match Camera::new(config) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(Response::Enroll(EnrollResponse {
+                success: false,
+                message: format!("Failed to initialize camera: {}", e),
+            }));
+        }
+    };
+    
+    // Create ASCII renderer for preview
+    let renderer = AsciiRenderer::new(
+        config.enrollment.ascii_width,
+        config.enrollment.ascii_height
+    );
+    
+    // Capture multiple images
+    let mut embeddings = Vec::new();
+    let mut quality_scores = Vec::new();
+    let total_captures = config.enrollment.num_captures.unwrap_or(5);
+    let min_quality = config.enrollment.min_enrollment_quality;
+    
+    tracing::info!("Capturing {} images for enrollment with ASCII preview", total_captures);
+    
+    // Start camera session
+    let mut session = match camera.start_session() {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(Response::Enroll(EnrollResponse {
+                success: false,
+                message: format!("Failed to start camera: {}", e),
+            }));
+        }
+    };
+    
+    let mut captured = 0;
+    let capture_interval_ms = config.enrollment.capture_interval_ms.unwrap_or(2000);
+    let capture_interval = Duration::from_millis(capture_interval_ms);
+    
+    // Calculate dynamic timeout: num_captures * interval * 5 for overhead
+    let enrollment_timeout = Duration::from_millis(
+        total_captures as u64 * capture_interval_ms * 5
+    );
+    let enrollment_start = Instant::now();
+    let mut last_capture_time = Instant::now();
+    
+    tracing::info!("Enrollment timeout set to {:.1}s for {} captures with {:.1}s intervals",
+                 enrollment_timeout.as_secs_f32(), total_captures, capture_interval.as_secs_f32());
+    
+    while captured < total_captures && enrollment_start.elapsed() < enrollment_timeout {
+        // Capture frame
+        let frame = match session.capture_frame() {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to capture frame: {}", e);
+                continue;
+            }
+        };
+        
+        // Detect faces
+        let faces = match detector.detect(&frame) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to detect faces: {}", e);
+                vec![]
+            }
+        };
+        
+        // Send ASCII preview frame
+        let ascii = renderer.render_frame_with_progress(
+            &frame,
+            &faces,
+            captured,
+            total_captures
+        );
+        
+        if let Err(e) = send_stream_message(stream, &StreamMessage::PreviewFrame { 
+            ascii,
+            captured,
+            total: total_captures,
+        }) {
+            tracing::warn!("Failed to send preview frame: {}", e);
+            // Continue even if preview fails
+        }
+        
+        // Check if we have a face and enough time has passed
+        if !faces.is_empty() && last_capture_time.elapsed() >= capture_interval {
+            let face = &faces[0];
+            
+            // Calculate quality metrics
+            let quality = QualityMetrics::calculate(&frame, face);
+            
+            // Check if quality meets requirements
+            if quality.meets_minimum_requirements(min_quality) {
+                // Get embedding
+                let embedding = match recognizer.get_embedding(&frame, face) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("Failed to get embedding: {}", e);
+                        continue;
+                    }
+                };
+                
+                // Save enrollment image
+                let image_path = enrollment_dir.join(format!("enroll_{}.jpg", captured));
+                if let Err(e) = frame.save(&image_path) {
+                    tracing::warn!("Failed to save enrollment image: {}", e);
+                }
+                
+                embeddings.push(embedding);
+                quality_scores.push(quality.overall_score);
+                captured += 1;
+                last_capture_time = Instant::now();
+                
+                // Use debug level to avoid interfering with ASCII preview
+                tracing::debug!("Captured image {}/{} with quality {:.2}", captured, total_captures, quality.overall_score);
+                
+                // Send status update through the stream (not to stderr)
+                if let Err(e) = send_stream_message(stream, &StreamMessage::StatusUpdate { 
+                    message: format!("Captured image {}/{} with quality {:.2}", captured, total_captures, quality.overall_score),
+                }) {
+                    tracing::debug!("Failed to send status update: {}", e);
+                }
+            } else {
+                tracing::debug!("Image quality too low: {:.2}", quality.overall_score);
+            }
+        }
+        
+        // Small delay to prevent CPU hogging
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    
+    // Check if we have enough captures
+    let success = captured >= total_captures;
+    
+    // Calculate consistency if we have embeddings
+    let consistency = if embeddings.len() > 1 {
+        sup_linux::quality::calculate_embedding_consistency(&embeddings)
+    } else {
+        0.0
+    };
+    
+    // Send the enrollment report as final frame
+    let report = format_enrollment_report(
+        &request.username,
+        captured,
+        total_captures,
+        &quality_scores,
+        consistency,
+        success,
+        config.enrollment.ascii_width.unwrap_or(60),
+        config.enrollment.ascii_height.unwrap_or(25),
+    );
+    
+    if let Err(e) = send_stream_message(stream, &StreamMessage::PreviewFrame {
+        ascii: report,
+        captured,
+        total: total_captures,
+    }) {
+        tracing::debug!("Failed to send enrollment report: {}", e);
+    }
+    
+    // If enrollment failed, return early
+    if !success {
+        return Ok(Response::Enroll(EnrollResponse {
+            success: false,
+            message: format!("Enrollment failed: only {}/{} captures completed", captured, total_captures),
+        }));
+    }
+    
+    // Calculate averaged embedding for successful enrollment
+    let averaged_embedding = if !embeddings.is_empty() {
+        let embedding_size = embeddings[0].len();
+        let mut averaged = vec![0.0f32; embedding_size];
+        
+        for embedding in &embeddings {
+            for (i, &value) in embedding.iter().enumerate() {
+                averaged[i] += value;
+            }
+        }
+        
+        let count = embeddings.len() as f32;
+        for value in &mut averaged {
+            *value /= count;
+        }
+        
+        Some(averaged)
+    } else {
+        None
+    };
+    
+    // Create user data
+    let user_data = sup_linux::storage::UserData {
+        version: 1,
+        username: request.username.clone(),
+        embeddings,
+        averaged_embedding,
+        embedding_qualities: Some(quality_scores.clone()),
+    };
+    
+    // Save user data
+    if let Err(e) = store.save_user_data(&user_data) {
+        return Ok(Response::Enroll(EnrollResponse {
+            success: false,
+            message: format!("Failed to save user data: {}", e),
+        }));
+    }
+    
+    Ok(Response::Enroll(EnrollResponse {
+        success: true,
+        message: format!("User '{}' enrolled successfully with {} face captures", 
+                        request.username, user_data.embeddings.len()),
+    }))
 }
 
 fn handle_enroll_request(
@@ -394,15 +1003,20 @@ fn handle_enroll_request(
     };
     
     let mut captured = 0;
-    let mut attempts = 0;
-    let max_attempts = 30;
-    let capture_interval = Duration::from_millis(
-        config.enrollment.capture_interval_ms.unwrap_or(2000)
+    let capture_interval_ms = config.enrollment.capture_interval_ms.unwrap_or(2000);
+    let capture_interval = Duration::from_millis(capture_interval_ms);
+    
+    // Calculate dynamic timeout: num_captures * interval * 3 for overhead
+    let enrollment_timeout = Duration::from_millis(
+        total_captures as u64 * capture_interval_ms * 3
     );
+    let enrollment_start = Instant::now();
     let mut last_capture_time = Instant::now();
     
-    while captured < total_captures && attempts < max_attempts {
-        attempts += 1;
+    tracing::info!("Enrollment timeout set to {:.1}s for {} captures with {:.1}s intervals",
+                 enrollment_timeout.as_secs_f32(), total_captures, capture_interval.as_secs_f32());
+    
+    while captured < total_captures && enrollment_start.elapsed() < enrollment_timeout {
         
         // Capture frame
         let frame = match session.capture_frame() {
@@ -736,6 +1350,336 @@ fn generate_signature(embedding: &[f32], challenge: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+// Streaming version of enhancement that sends ASCII preview frames
+fn handle_enhance_request_streaming(
+    stream: &mut UnixStream,
+    detector: &FaceDetector,
+    recognizer: &FaceRecognizer,
+    request: EnhanceRequest,
+    peer_cred: &PeerCredentials,
+    config: &Config,
+    data_dir: &Path,
+) -> Result<Response> {
+    use sup_linux::quality::QualityMetrics;
+    
+    // Authorization check: Users can only enhance themselves unless they're root
+    if peer_cred.uid != 0 {
+        let requesting_user = get_username_from_uid(peer_cred.uid);
+        if let Ok(req_user) = requesting_user {
+            if req_user != request.username {
+                tracing::warn!("User {} (UID {}) attempted to enhance as {}", 
+                    req_user, peer_cred.uid, request.username);
+                return Ok(Response::Enhance(EnhanceResponse {
+                    success: false,
+                    message: format!("Permission denied: You can only enhance your own enrollment"),
+                    embeddings_before: 0,
+                    embeddings_after: 0,
+                    replaced_count: 0,
+                }));
+            }
+        } else {
+            tracing::warn!("Could not determine username for UID {}", peer_cred.uid);
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to verify user identity"),
+                embeddings_before: 0,
+                embeddings_after: 0,
+                replaced_count: 0,
+            }));
+        }
+    }
+    
+    tracing::info!("Starting streaming enhancement for user: {} (requested by UID: {})", 
+        request.username, peer_cred.uid);
+    
+    // Create user store
+    let store = match UserStore::new_with_paths(
+        data_dir.join("users"),
+        data_dir.join("enrollment"),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to initialize storage: {}", e),
+                embeddings_before: 0,
+                embeddings_after: 0,
+                replaced_count: 0,
+            }));
+        }
+    };
+    
+    // Load existing user data
+    let mut user_data = match store.get_user(&request.username) {
+        Ok(data) => data,
+        Err(_) => {
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("User {} not found. Please enroll first.", request.username),
+                embeddings_before: 0,
+                embeddings_after: 0,
+                replaced_count: 0,
+            }));
+        }
+    };
+    
+    let embeddings_before = user_data.embeddings.len();
+    
+    // Get enrollment images directory
+    let enrollment_dir = match store.get_enrollment_images_dir(&request.username) {
+        Ok(dir) => {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Ok(Response::Enhance(EnhanceResponse {
+                    success: false,
+                    message: format!("Failed to create enrollment directory: {}", e),
+                    embeddings_before,
+                    embeddings_after: embeddings_before,
+                    replaced_count: 0,
+                }));
+            }
+            dir
+        }
+        Err(e) => {
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to get enrollment directory: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            }));
+        }
+    };
+    
+    // Create camera just for this enhancement
+    let mut camera = match Camera::new(config) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to initialize camera: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            }));
+        }
+    };
+    
+    // Create ASCII renderer for preview
+    let renderer = AsciiRenderer::new(
+        config.enrollment.ascii_width,
+        config.enrollment.ascii_height
+    );
+    
+    // Capture additional images
+    let mut new_embeddings = Vec::new();
+    let mut new_quality_scores = Vec::new();
+    let additional_captures = request.additional_captures.unwrap_or(3) as usize;
+    let min_quality = config.enrollment.min_enrollment_quality;
+    
+    tracing::info!("Capturing {} additional images for enhancement with ASCII preview", additional_captures);
+    
+    // Start camera session
+    let mut session = match camera.start_session() {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to start camera: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            }));
+        }
+    };
+    
+    let mut captured = 0usize;
+    let capture_interval_ms = config.enrollment.capture_interval_ms.unwrap_or(2000);
+    let capture_interval = Duration::from_millis(capture_interval_ms);
+    
+    // Calculate dynamic timeout: num_captures * interval * 5 for overhead
+    let enhancement_timeout = Duration::from_millis(
+        additional_captures as u64 * capture_interval_ms * 5
+    );
+    let enhancement_start = Instant::now();
+    let mut last_capture_time = Instant::now();
+    
+    tracing::info!("Enhancement timeout set to {:.1}s for {} captures with {:.1}s intervals",
+                 enhancement_timeout.as_secs_f32(), additional_captures, capture_interval.as_secs_f32());
+    
+    // Find next image index for saving
+    let mut next_image_idx = 0;
+    while enrollment_dir.join(format!("enhance_{}.jpg", next_image_idx)).exists() {
+        next_image_idx += 1;
+    }
+    
+    while captured < additional_captures && enhancement_start.elapsed() < enhancement_timeout {
+        // Capture frame
+        let frame = match session.capture_frame() {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to capture frame: {}", e);
+                continue;
+            }
+        };
+        
+        // Detect faces
+        let faces = match detector.detect(&frame) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to detect faces: {}", e);
+                vec![]
+            }
+        };
+        
+        // Send ASCII preview frame
+        let ascii = renderer.render_frame_with_progress(
+            &frame,
+            &faces,
+            captured,
+            additional_captures
+        );
+        
+        if let Err(e) = send_stream_message(stream, &StreamMessage::PreviewFrame { 
+            ascii,
+            captured,
+            total: additional_captures,
+        }) {
+            tracing::warn!("Failed to send preview frame: {}", e);
+            // Continue even if preview fails
+        }
+        
+        // Check if we have a face and enough time has passed
+        if !faces.is_empty() && last_capture_time.elapsed() >= capture_interval {
+            let face = &faces[0];
+            
+            // Calculate quality metrics
+            let quality = QualityMetrics::calculate(&frame, face);
+            
+            // Check if quality meets requirements
+            if quality.meets_minimum_requirements(min_quality) {
+                // Get embedding
+                let embedding = match recognizer.get_embedding(&frame, face) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("Failed to get embedding: {}", e);
+                        continue;
+                    }
+                };
+                
+                // Save enhancement image
+                let image_path = enrollment_dir.join(format!("enhance_{}.jpg", next_image_idx + captured));
+                if let Err(e) = frame.save(&image_path) {
+                    tracing::warn!("Failed to save enhancement image: {}", e);
+                }
+                
+                new_embeddings.push(embedding);
+                new_quality_scores.push(quality.overall_score);
+                captured += 1;
+                last_capture_time = Instant::now();
+                
+                // Use debug level to avoid interfering with ASCII preview
+                tracing::debug!("Captured enhancement image {}/{} with quality {:.2}", 
+                             captured, additional_captures, quality.overall_score);
+                
+                // Send status update through the stream (not to stderr)
+                if let Err(e) = send_stream_message(stream, &StreamMessage::StatusUpdate { 
+                    message: format!("Captured image {}/{} with quality {:.2}", 
+                                   captured, additional_captures, quality.overall_score),
+                }) {
+                    tracing::debug!("Failed to send status update: {}", e);
+                }
+            } else {
+                tracing::debug!("Image quality too low: {:.2}", quality.overall_score);
+            }
+        }
+        
+        // Small delay to prevent CPU hogging
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    
+    // Check if we captured enough for success
+    let success = captured > 0;  // Enhancement can succeed with partial captures
+    
+    // Merge new embeddings with existing data
+    let (added_count, replaced_count) = if !new_embeddings.is_empty() {
+        store.merge_user_data(
+            &mut user_data,
+            new_embeddings,
+            new_quality_scores.clone(),
+            request.replace_weak
+        )
+    } else {
+        (0, 0)
+    };
+    
+    // Save updated user data if we have new embeddings
+    if added_count > 0 {
+        if let Err(e) = store.save_user_data(&user_data) {
+            return Ok(Response::Enhance(EnhanceResponse {
+                success: false,
+                message: format!("Failed to save enhanced enrollment data: {}", e),
+                embeddings_before,
+                embeddings_after: embeddings_before,
+                replaced_count: 0,
+            }));
+        }
+    }
+    
+    let embeddings_after = user_data.embeddings.len();
+    
+    // Send the enhancement report as final frame
+    let report = format_enhancement_report(
+        &request.username,
+        captured,
+        additional_captures,
+        embeddings_before,
+        embeddings_after,
+        &new_quality_scores,
+        replaced_count,
+        success,
+        config.enrollment.ascii_width.unwrap_or(60),
+        config.enrollment.ascii_height.unwrap_or(25),
+    );
+    
+    if let Err(e) = send_stream_message(stream, &StreamMessage::PreviewFrame {
+        ascii: report,
+        captured,
+        total: additional_captures,
+    }) {
+        tracing::debug!("Failed to send enhancement report: {}", e);
+    }
+    
+    // Create the response
+    if success {
+        tracing::info!("Successfully enhanced user: {} (before: {}, after: {}, replaced: {})", 
+                     request.username, embeddings_before, embeddings_after, replaced_count);
+        Ok(Response::Enhance(EnhanceResponse {
+            success: true,
+            message: format!(
+                "Successfully enhanced enrollment for '{}'. Added {} embeddings{}",
+                request.username,
+                added_count,
+                if replaced_count > 0 {
+                    format!(", replaced {} weak embeddings", replaced_count)
+                } else {
+                    String::new()
+                }
+            ),
+            embeddings_before,
+            embeddings_after,
+            replaced_count,
+        }))
+    } else {
+        Ok(Response::Enhance(EnhanceResponse {
+            success: false,
+            message: "Failed to capture any valid face images for enhancement".to_string(),
+            embeddings_before,
+            embeddings_after: embeddings_before,
+            replaced_count: 0,
+        }))
+    }
+}
+
 fn handle_enhance_request(
     detector: &FaceDetector,
     recognizer: &FaceRecognizer,
@@ -871,12 +1815,18 @@ fn handle_enhance_request(
     };
     
     let mut captured = 0;
-    let mut attempts = 0;
-    let max_attempts = 30;
-    let capture_interval = Duration::from_millis(
-        config.enrollment.capture_interval_ms.unwrap_or(2000)
+    let capture_interval_ms = config.enrollment.capture_interval_ms.unwrap_or(2000);
+    let capture_interval = Duration::from_millis(capture_interval_ms);
+    
+    // Calculate dynamic timeout: num_captures * interval * 3 for overhead
+    let enhancement_timeout = Duration::from_millis(
+        additional_captures as u64 * capture_interval_ms * 3
     );
+    let enhancement_start = Instant::now();
     let mut last_capture_time = Instant::now();
+    
+    tracing::info!("Enhancement timeout set to {:.1}s for {} captures with {:.1}s intervals",
+                 enhancement_timeout.as_secs_f32(), additional_captures, capture_interval.as_secs_f32());
     
     // Find next image index for saving
     let mut next_image_idx = 0;
@@ -884,8 +1834,7 @@ fn handle_enhance_request(
         next_image_idx += 1;
     }
     
-    while captured < additional_captures && attempts < max_attempts {
-        attempts += 1;
+    while captured < additional_captures && enhancement_start.elapsed() < enhancement_timeout {
         
         // Capture frame
         let frame = match session.capture_frame() {
